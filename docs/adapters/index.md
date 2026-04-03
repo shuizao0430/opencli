@@ -17,7 +17,7 @@ Run `opencli list` for the live registry.
 | **[v2ex](./browser/v2ex)** | `hot` `latest` `topic` `node` `user` `member` `replies` `nodes` `daily` `me` `notifications` | 🌐 / 🔐 |
 | **[bloomberg](./browser/bloomberg)** | `main` `markets` `economics` `industries` `tech` `politics` `businessweek` `opinions` `feeds` `news` | 🌐 / 🔐 |
 | **[weibo](./browser/weibo)** | `hot` `search` | 🔐 Browser |
-| **[linkedin](./browser/linkedin)** | `search` `timeline` | 🔐 Browser |
+| **[linkedin](./browser/linkedin)** | `search` `timeline` `people-search` `profile` `recruiter-project-list` `recruiter-project-members` `recruiter-saved-searches` `message` `save-to-project` `tag` `notes` `batch-message` `inbox-list` `inbox-msg` `inbox-reply` `batch-reply` `stats` `follow-up-queue` `follow-up-batch-reply` `export-follow-up` | 🔐 Browser |
 | **[coupang](./browser/coupang)** | `search` `add-to-cart` | 🔐 Browser |
 | **[boss](./browser/boss)** | `search` `detail` `recommend` `joblist` `greet` `batchgreet` `send` `chatlist` `chatmsg` `invite` `mark` `exchange` `resume` `stats` | 🔐 Browser |
 | **[ctrip](./browser/ctrip)** | `search` | 🔐 Browser |
