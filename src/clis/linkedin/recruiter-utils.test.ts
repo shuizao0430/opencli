@@ -5,6 +5,7 @@ const {
   normalizeWhitespace,
   parseCsvArg,
   toYesNo,
+  queriesLookCompatible,
   candidateIdFromProfileUrl,
   decodeCandidateId,
   resolveRecruiterProfileUrl,
@@ -12,8 +13,11 @@ const {
   buildRecruiterInboxUrl,
   buildRecruiterInboxThreadUrl,
   buildRecruiterSearchUrl,
+  formatNetworkDistance,
+  firstCurrentWorkExperience,
   mergeCandidates,
   mergeInboxThreads,
+  extractRecruiterPeopleFromSearchHitsPayload,
   summarizeRecruiterPeopleStats,
   summarizeRecruiterInboxStats,
   buildRecruiterFollowUpQueue,
@@ -39,6 +43,12 @@ describe('linkedin recruiter utils', () => {
     expect(toYesNo(true)).toBe('yes');
     expect(toYesNo('Open')).toBe('yes');
     expect(toYesNo('0')).toBe('no');
+  });
+
+  it('detects compatible recruiter queries without requiring an exact string match', () => {
+    expect(queriesLookCompatible('technical recruiter', 'technical recruiter singapore')).toBe(true);
+    expect(queriesLookCompatible('technical recruiter', 'senior technical recruiter')).toBe(true);
+    expect(queriesLookCompatible('technical recruiter', 'talent acquisition')).toBe(false);
   });
 
   it('encodes and decodes candidate ids from profile urls', () => {
@@ -96,6 +106,20 @@ describe('linkedin recruiter utils', () => {
     expect(url).toContain('start=20');
   });
 
+  it('normalizes recruiter network distance and work experience helpers', () => {
+    expect(formatNetworkDistance('SECOND_DEGREE')).toBe('2nd');
+    expect(formatNetworkDistance('FIRST_DEGREE')).toBe('1st');
+    expect(formatNetworkDistance('2 度人脉 · 2 度')).toBe('2nd');
+    expect(firstCurrentWorkExperience({
+      workExperience: [
+        { companyName: 'Data Concepts', title: 'Technical Recruiter' },
+      ],
+    })).toEqual({
+      company: 'Data Concepts',
+      title: 'Technical Recruiter',
+    });
+  });
+
   it('deduplicates candidates by candidate_id', () => {
     const base = {
       candidate_id: 'url:abc',
@@ -114,6 +138,92 @@ describe('linkedin recruiter utils', () => {
     const merged = mergeCandidates([base], [base, { ...base, candidate_id: 'url:def', name: 'B' }]);
     expect(merged).toHaveLength(2);
     expect(merged[1].name).toBe('B');
+  });
+
+  it('extracts recruiter candidates from searchHits payloads', () => {
+    const candidates = extractRecruiterPeopleFromSearchHitsPayload({
+      data: {
+        elements: [
+          {
+            entityUrn: 'urn:li:ts_profile:AEMA123',
+            firstName: 'Jane',
+            lastName: 'Doe',
+            headline: 'Recruiting @ Airwallex',
+            locationName: 'Singapore',
+            defaultPosition: {
+              title: 'Manager, Talent Acquisition',
+              companyName: 'Airwallex',
+            },
+            publicProfileUrl: 'https://www.linkedin.com/in/jane-doe/?trk=foo',
+            memberPreferences: {
+              openToNewOpportunities: true,
+              titles: ['Manager, Talent Acquisition'],
+            },
+            highlights: {
+              connections: {
+                totalCount: 8,
+              },
+            },
+            canSendInMail: true,
+          },
+        ],
+      },
+    });
+
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({
+      candidate_id: 'AEMA123',
+      name: 'Jane Doe',
+      headline: 'Recruiting @ Airwallex',
+      location: 'Singapore',
+      current_company: 'Airwallex',
+      current_title: 'Manager, Talent Acquisition',
+      open_to_work: 'yes',
+    });
+    expect(candidates[0].profile_url).toBe('https://www.linkedin.com/in/jane-doe/');
+    expect(candidates[0].match_signals).toContain('open to work');
+    expect(candidates[0].match_signals).toContain('8 mutual connections');
+    expect(candidates[0].match_signals).toContain('can send inmail');
+  });
+
+  it('merges richer candidate fields and cleans noisy match signals', () => {
+    const merged = mergeCandidates([
+      {
+        candidate_id: 'candidate-1',
+        profile_url: 'https://www.linkedin.com/talent/profile/candidate-1',
+        name: 'Jane Doe',
+        headline: '',
+        location: '',
+        current_company: '',
+        current_title: '',
+        connection_degree: '',
+        open_to_work: 'no',
+        match_signals: '发消息给Jane; 2 mutual connections',
+        list_source: 'search',
+      },
+    ], [
+      {
+        candidate_id: 'candidate-1',
+        profile_url: 'https://www.linkedin.com/talent/profile/candidate-1',
+        name: 'Jane Doe',
+        headline: 'Recruiting @ Airwallex',
+        location: 'Singapore',
+        current_company: 'Airwallex',
+        current_title: 'Manager, Talent Acquisition',
+        connection_degree: '2 度人脉',
+        open_to_work: 'yes',
+        match_signals: '发消息给Jane; 进入就业市场; 2 位好友; 极有可能有意向',
+        list_source: 'search',
+      },
+    ]);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].headline).toBe('Recruiting @ Airwallex');
+    expect(merged[0].location).toBe('Singapore');
+    expect(merged[0].current_company).toBe('Airwallex');
+    expect(merged[0].current_title).toBe('Manager, Talent Acquisition');
+    expect(merged[0].connection_degree).toBe('2nd');
+    expect(merged[0].match_signals).toBe('2 mutual connections; open to work; likely interested');
   });
 
   it('deduplicates inbox threads by conversation_id then candidate_id', () => {

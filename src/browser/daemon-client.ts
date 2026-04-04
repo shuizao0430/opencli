@@ -28,6 +28,8 @@ export interface DaemonCommand {
   url?: string;
   op?: string;
   index?: number;
+  urlContains?: string;
+  activeOnly?: boolean;
   domain?: string;
   format?: 'png' | 'jpeg';
   quality?: number;

@@ -1,4 +1,5 @@
 import { AuthRequiredError, CommandExecutionError, EmptyResultError } from '../../errors.js';
+import { generateInterceptorJs } from '../../interceptor.js';
 import type { IPage } from '../../types.js';
 
 export interface RecruiterPeopleSearchInput {
@@ -186,6 +187,17 @@ interface SurfaceDetectionResult {
   publicProfileDetected: boolean;
 }
 
+export interface RecruiterSearchStateProbe {
+  currentUrl: string;
+  currentKeywords: string;
+  visibleKeywords: string;
+  recentApiKeywords: string[];
+  hasSearchApiTraffic: boolean;
+  hasVisibleResults: boolean;
+  matchingQuery: boolean;
+  shouldReuseCurrentSearch: boolean;
+}
+
 export function normalizeWhitespace(value: unknown): string {
   return String(value ?? '').replace(/\s+/g, ' ').trim();
 }
@@ -205,6 +217,21 @@ export function toYesNo(value: unknown): string {
   if (['true', '1', 'yes', 'y', 'open'].includes(normalized)) return 'yes';
   if (['false', '0', 'no', 'n', 'closed'].includes(normalized)) return 'no';
   return normalized;
+}
+
+function tokenizeRecruiterSearchQuery(value: unknown): string[] {
+  return normalizeWhitespace(value)
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(token => token.length >= 2);
+}
+
+export function queriesLookCompatible(expected: unknown, candidate: unknown): boolean {
+  const expectedTokens = tokenizeRecruiterSearchQuery(expected);
+  const candidateTokens = tokenizeRecruiterSearchQuery(candidate);
+  if (expectedTokens.length === 0 || candidateTokens.length === 0) return false;
+  const candidateSet = new Set(candidateTokens);
+  return expectedTokens.every(token => candidateSet.has(token));
 }
 
 export function canonicalizeLinkedinUrl(url: string): string {
@@ -311,22 +338,283 @@ export function buildRecruiterSearchUrl(input: RecruiterPeopleSearchInput): stri
   return `https://www.linkedin.com/talent/search?${params.toString()}`;
 }
 
+function normalizeRecruiterSignal(value: string): string {
+  const normalized = normalizeWhitespace(value);
+  if (!normalized) return '';
+  const mutualCount = normalized.match(/(\d+)\s*(?:位好友|好友|mutual connections?)/i);
+  if (mutualCount) return `${mutualCount[1]} mutual connections`;
+  if (/进入就业市场|open to work/i.test(normalized)) return 'open to work';
+  if (/极有可能有意向|likely interested/i.test(normalized)) return 'likely interested';
+  if (/can send inmail/i.test(normalized)) return 'can send inmail';
+  if (/recently active/i.test(normalized)) return 'recently active';
+  if (/actively hiring/i.test(normalized)) return 'actively hiring';
+  if (/actively interviewing/i.test(normalized)) return 'actively interviewing';
+  return normalized;
+}
+
 export function summarizeSignals(parts: string[]): string {
-  return [...new Set(parts.map(part => normalizeWhitespace(part)).filter(Boolean))].join('; ');
+  const noisyActionPattern = /^(?:发消息给|message\s+\S|send message|send inmail|inmail\s+\S|view profile|查看资料|查看档案|邀请候选人|邀请)/i;
+  return [...new Set(
+    parts
+      .map(part => normalizeRecruiterSignal(part))
+      .filter(Boolean)
+      .filter(part => !noisyActionPattern.test(part)),
+  )].join('; ');
+}
+
+function formatNetworkDistance(value: unknown): string {
+  const raw = normalizeWhitespace(value);
+  const normalized = raw.toUpperCase();
+  if (!normalized) return '';
+  if (normalized === 'FIRST_DEGREE' || normalized === '1ST' || normalized === '1ST_DEGREE') return '1st';
+  if (normalized === 'SECOND_DEGREE' || normalized === '2ND' || normalized === '2ND_DEGREE') return '2nd';
+  if (normalized === 'THIRD_DEGREE' || normalized === '3RD' || normalized === '3RD_DEGREE') return '3rd';
+  const chineseDegree = raw.match(/([123])\s*度/);
+  if (chineseDegree) return `${chineseDegree[1]}${chineseDegree[1] === '1' ? 'st' : chineseDegree[1] === '2' ? 'nd' : 'rd'}`;
+  return raw;
+}
+
+function firstCurrentWorkExperience(source: unknown): { company: string; title: string } {
+  const list = Array.isArray((source as any)?.workExperience)
+    ? (source as any).workExperience
+    : Array.isArray((source as any)?.positions)
+      ? (source as any).positions
+      : [];
+  for (const entry of list) {
+    const company = normalizeWhitespace(
+      entry?.companyName
+      || entry?.company?.name
+      || entry?.companyResolutionResult?.name,
+    );
+    const title = normalizeWhitespace(entry?.title || entry?.positionTitle);
+    if (company || title) return { company, title };
+  }
+  return { company: '', title: '' };
+}
+
+function readNestedText(source: unknown, paths: string[]): string {
+  for (const path of paths) {
+    const value = path.split('.').reduce<any>((current, part) => current?.[part], source as any);
+    if (value && typeof value === 'object') continue;
+    const normalized = normalizeWhitespace(value);
+    if (normalized) return normalized;
+  }
+  return '';
+}
+
+function extractUrnTail(value: string): string {
+  const normalized = normalizeWhitespace(value);
+  if (!normalized) return '';
+  const tail = normalized.split(':').filter(Boolean).pop() || '';
+  try {
+    return normalizeWhitespace(decodeURIComponent(tail));
+  } catch {
+    return normalizeWhitespace(tail);
+  }
+}
+
+function flattenObjects(root: unknown, limit = 1500): Record<string, unknown>[] {
+  const results: Record<string, unknown>[] = [];
+  const stack: unknown[] = [root];
+  const seen = new Set<unknown>();
+
+  while (stack.length > 0 && results.length < limit) {
+    const current = stack.pop();
+    if (!current || typeof current !== 'object' || seen.has(current)) continue;
+    seen.add(current);
+    if (Array.isArray(current)) {
+      for (const item of current) stack.push(item);
+      continue;
+    }
+    const record = current as Record<string, unknown>;
+    results.push(record);
+    for (const value of Object.values(record)) {
+      if (value && typeof value === 'object') stack.push(value);
+    }
+  }
+
+  return results;
+}
+
+function candidateFromSearchHitNode(
+  node: Record<string, unknown>,
+  listSource: string,
+): RecruiterCandidateSummary | null {
+  const profileUrl = decodeLinkedinRedirect(readNestedText(node, [
+    'publicProfileUrl',
+    'profileUrl',
+    'member.publicProfileUrl',
+    'profile.publicProfileUrl',
+    'candidate.publicProfileUrl',
+  ]));
+  const entityUrn = readNestedText(node, [
+    'entityUrn',
+    'memberUrn',
+    'profileUrn',
+    'candidateUrn',
+    'member.entityUrn',
+    'profile.entityUrn',
+    'candidate.entityUrn',
+  ]);
+  const memberId = extractUrnTail(entityUrn);
+  const candidateId = normalizeWhitespace(
+    memberId
+    || candidateIdFromArtifacts(profileUrl, entityUrn)
+    || readNestedText(node, ['candidateId', 'memberId', 'id'])
+  );
+  const name = normalizeWhitespace(
+    readNestedText(node, [
+      'fullName',
+      'name',
+      'member.fullName',
+      'profile.fullName',
+      'candidate.fullName',
+    ])
+    || [readNestedText(node, ['firstName', 'member.firstName', 'profile.firstName']), readNestedText(node, ['lastName', 'member.lastName', 'profile.lastName'])].filter(Boolean).join(' ')
+  );
+  const headline = readNestedText(node, [
+    'headline',
+    'subTitle',
+    'occupation',
+    'member.headline',
+    'profile.headline',
+    'candidate.headline',
+    'defaultPosition.title',
+    'defaultPosition.headline',
+  ]);
+  const location = readNestedText(node, [
+    'location',
+    'locationName',
+    'geoLocationName',
+    'geo.locationName',
+    'member.locationName',
+    'profile.locationName',
+    'candidate.locationName',
+  ]);
+  const currentCompany = readNestedText(node, [
+    'currentCompany.name',
+    'defaultPosition.companyName',
+    'defaultPosition.company.name',
+    'member.currentCompany.name',
+    'profile.currentCompany.name',
+    'candidate.currentCompany.name',
+    'workExperience.0.companyName',
+    'workExperience.0.company.name',
+    'workExperience.0.companyResolutionResult.name',
+  ]);
+  const currentTitle = readNestedText(node, [
+    'currentTitle',
+    'defaultPosition.title',
+    'member.currentTitle',
+    'profile.currentTitle',
+    'candidate.currentTitle',
+    'memberPreferences.titles.0',
+    'workExperience.0.title',
+  ]);
+  const connectionDegree = formatNetworkDistance(readNestedText(node, [
+    'networkDistance',
+    'connectionDegree',
+    'distance',
+    'member.networkDistance',
+  ]));
+  const openToWorkValue = readNestedText(node, [
+    'memberPreferences.openToNewOpportunities',
+    'openToWork',
+    'openToWorkPreference',
+    'candidate.openToWork',
+  ]);
+  const mutualCount = readNestedText(node, [
+    'highlights.connections.totalCount',
+    'connections.totalCount',
+    'mutualConnectionsCount',
+    'socialProof.mutualConnectionsCount',
+  ]);
+  const signalParts = [
+    readNestedText(node, ['interestHeadline', 'signals.interestHeadline']),
+    openToWorkValue === 'true' ? 'open to work' : '',
+    mutualCount ? `${mutualCount} mutual connections` : '',
+    readNestedText(node, ['canSendInMail']) === 'true' ? 'can send inmail' : '',
+    readNestedText(node, ['signals.summary', 'socialProof.text', 'recentActivity']),
+  ];
+
+  if (!name) return null;
+  if (!candidateId && !profileUrl) return null;
+  if (!(headline || location || currentCompany || currentTitle || signalParts.some(Boolean))) return null;
+
+  return {
+    candidate_id: candidateId,
+    profile_url: profileUrl || resolveRecruiterProfileUrl(candidateId, profileUrl),
+    name,
+    headline,
+    location,
+    current_company: currentCompany,
+    current_title: currentTitle,
+    connection_degree: connectionDegree,
+    open_to_work: toYesNo(openToWorkValue),
+    match_signals: summarizeSignals(signalParts),
+    list_source: listSource,
+  };
+}
+
+export function extractRecruiterPeopleFromSearchHitsPayload(
+  payload: unknown,
+  listSource = 'search',
+): RecruiterCandidateSummary[] {
+  const records = flattenObjects(payload);
+  let merged: RecruiterCandidateSummary[] = [];
+  for (const record of records) {
+    const candidate = candidateFromSearchHitNode(record, listSource);
+    if (!candidate) continue;
+    merged = mergeCandidates(merged, [candidate]);
+  }
+  return merged;
 }
 
 export function mergeCandidates(
   existing: RecruiterCandidateSummary[],
   incoming: RecruiterCandidateSummary[],
 ): RecruiterCandidateSummary[] {
-  const seen = new Set(existing.map(item => item.candidate_id || item.profile_url));
+  const keyOf = (item: RecruiterCandidateSummary) => item.candidate_id || item.profile_url;
   const merged = [...existing];
+  const indexByKey = new Map<string, number>();
+  for (let i = 0; i < merged.length; i++) {
+    const key = keyOf(merged[i]);
+    if (key) indexByKey.set(key, i);
+  }
+  const mergeField = (current: string, next: string): string => {
+    const a = normalizeWhitespace(current);
+    const b = normalizeWhitespace(next);
+    if (!a) return b;
+    if (!b) return a;
+    return b.length > a.length ? b : a;
+  };
 
   for (const item of incoming) {
-    const key = item.candidate_id || item.profile_url;
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    merged.push(item);
+    const key = keyOf(item);
+    if (!key) continue;
+    const existingIndex = indexByKey.get(key);
+    if (existingIndex === undefined) {
+      indexByKey.set(key, merged.length);
+      merged.push(item);
+      continue;
+    }
+    const current = merged[existingIndex];
+    merged[existingIndex] = {
+      ...current,
+      ...item,
+      profile_url: mergeField(current.profile_url, item.profile_url),
+      name: mergeField(current.name, item.name),
+      headline: mergeField(current.headline, item.headline),
+      location: mergeField(current.location, item.location),
+      current_company: mergeField(current.current_company, item.current_company),
+      current_title: mergeField(current.current_title, item.current_title),
+      connection_degree: formatNetworkDistance(mergeField(current.connection_degree, item.connection_degree)),
+      open_to_work: mergeField(current.open_to_work, item.open_to_work),
+      match_signals: summarizeSignals([
+        ...parseCsvArg(current.match_signals.replace(/;\s*/g, ',')),
+        ...parseCsvArg(item.match_signals.replace(/;\s*/g, ',')),
+      ]),
+    };
   }
 
   return merged;
@@ -762,8 +1050,101 @@ function detectLinkedinSurfaceInPage(): SurfaceDetectionResult {
   return { currentUrl, loginRequired, recruiterDetected, publicProfileDetected };
 }
 
+function inspectRecruiterSearchStateInPage(input: RecruiterPeopleSearchInput): RecruiterSearchStateProbe {
+  const normalize = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
+  const tokenize = (value: unknown) => normalize(value)
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(token => token.length >= 2);
+  const looksCompatible = (expected: unknown, candidate: unknown) => {
+    const expectedTokens = tokenize(expected);
+    const candidateTokens = tokenize(candidate);
+    if (expectedTokens.length === 0 || candidateTokens.length === 0) return false;
+    const candidateSet = new Set(candidateTokens);
+    return expectedTokens.every(token => candidateSet.has(token));
+  };
+  const resourceNames = (() => {
+    try {
+      return performance.getEntriesByType('resource')
+        .map(entry => normalize((entry as PerformanceResourceTiming).name))
+        .filter(name => /\/talent\/api\/talentProfiles|talentRecruiterSearchHits/i.test(name))
+        .slice(-20);
+    } catch {
+      return [];
+    }
+  })();
+  const extractKeyword = (value: string): string => {
+    if (!value) return '';
+    try {
+      const parsed = new URL(value, window.location.origin);
+      return normalize(
+        parsed.searchParams.get('keywords')
+        || parsed.searchParams.get('query')
+        || parsed.searchParams.get('searchTerm')
+        || parsed.searchParams.get('freeText')
+        || '',
+      );
+    } catch {
+      return '';
+    }
+  };
+  const currentUrl = window.location.href;
+  const currentKeywords = extractKeyword(currentUrl);
+  const visibleKeywords = normalize(
+    document.querySelector<HTMLInputElement>(
+      'input[placeholder*="Search"], input[aria-label*="Search"], input[data-test-search-input], input[role="combobox"]',
+    )?.value || '',
+  );
+  const recentApiKeywords = [...new Set(resourceNames.map(extractKeyword).filter(Boolean))];
+  const hasVisibleResults = document.querySelectorAll(
+    'a[data-test-link-to-profile-link="true"], a[href*="/talent/profile/"], a[href*="/in/"]',
+  ).length > 0;
+  const matchingQuery = (
+    looksCompatible(input.query, currentKeywords)
+    || looksCompatible(input.query, visibleKeywords)
+    || recentApiKeywords.some(keyword => looksCompatible(input.query, keyword))
+  );
+  const hasSearchApiTraffic = recentApiKeywords.length > 0;
+
+  return {
+    currentUrl,
+    currentKeywords,
+    visibleKeywords,
+    recentApiKeywords,
+    hasSearchApiTraffic,
+    hasVisibleResults,
+    matchingQuery,
+    shouldReuseCurrentSearch: matchingQuery && (hasSearchApiTraffic || hasVisibleResults),
+  };
+}
+
 function seedRecruiterSearchInPage(input: RecruiterPeopleSearchInput): { applied: boolean; attempted: string[] } {
   const attempted: string[] = [];
+  const normalize = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
+  const clickSearchTrigger = () => {
+    const candidates = Array.from(document.querySelectorAll<HTMLElement>('button, [role="button"], a'));
+    const trigger = candidates.find(element => {
+      const label = normalize(
+        element.getAttribute('aria-label')
+        || element.getAttribute('title')
+        || element.textContent,
+      ).toLowerCase();
+      if (!label) return false;
+      return (
+        label === 'search'
+        || label === 'start search'
+        || label.includes('start search')
+        || label.includes('search candidates')
+        || label.includes('开始搜索')
+        || label.includes('搜索候选人')
+        || label.includes('search people')
+      );
+    });
+    if (!trigger) return false;
+    attempted.push(`click:${normalize(trigger.textContent || trigger.getAttribute('aria-label') || 'search-trigger')}`);
+    trigger.click();
+    return true;
+  };
   const setInputValue = (selectors: string[], value: string) => {
     if (!value) return false;
     for (const selector of selectors) {
@@ -792,12 +1173,29 @@ function seedRecruiterSearchInPage(input: RecruiterPeopleSearchInput): { applied
     'input[aria-label*="Location"]',
   ], input.location || '');
 
+  if (appliedKeyword || appliedLocation) {
+    clickSearchTrigger();
+  }
+
   return { applied: appliedKeyword || appliedLocation, attempted };
 }
 
 function extractRecruiterPeopleCardsInPage(listSource: string): RecruiterCandidateSummary[] {
   const normalize = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
   const uniq = (values: string[]) => [...new Set(values.map(value => normalize(value)).filter(Boolean))];
+  const normalizeSignal = (value: string) => {
+    const normalized = normalize(value);
+    if (!normalized) return '';
+    const mutualCount = normalized.match(/(\d+)\s*(?:位好友|好友|mutual connections?)/i);
+    if (mutualCount) return `${mutualCount[1]} mutual connections`;
+    if (/进入就业市场|open to work/i.test(normalized)) return 'open to work';
+    if (/极有可能有意向|likely interested/i.test(normalized)) return 'likely interested';
+    return normalized;
+  };
+  const summarize = (values: string[]) => {
+    const noisyActionPattern = /^(?:发消息给|message\s+\S|send message|send inmail|inmail\s+\S|view profile|查看资料|查看档案|邀请候选人|邀请)/i;
+    return [...new Set(values.map(value => normalizeSignal(value)).filter(Boolean).filter(value => !noisyActionPattern.test(value)))].join('; ');
+  };
   const base64UrlEncode = (value: string) => btoa(unescape(encodeURIComponent(value)))
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
@@ -814,12 +1212,32 @@ function extractRecruiterPeopleCardsInPage(listSource: string): RecruiterCandida
     }
   };
   const pickProfileLink = (root: Element): HTMLAnchorElement | null => {
+    const direct = root.querySelector('a[data-test-link-to-profile-link="true"]') as HTMLAnchorElement | null;
+    if (direct?.href) return direct;
     const links = Array.from(root.querySelectorAll('a[href]')) as HTMLAnchorElement[];
     return links.find(link => /\/in\/|\/talent\/profile\//.test(link.href)) || null;
   };
+  const readText = (root: Element, selectors: string[]): string => {
+    for (const selector of selectors) {
+      const value = normalize(root.querySelector(selector)?.textContent);
+      if (value) return value;
+    }
+    return '';
+  };
+  const parseHistoryLine = (value: string): { company: string; title: string } => {
+    const normalized = normalize(value);
+    if (!normalized) return { company: '', title: '' };
+    const [primary] = normalized.split(' · ').map(part => normalize(part));
+    if (!primary) return { company: '', title: '' };
+    const dashMatch = primary.match(/^(.+?)\s+-\s+(.+)$/);
+    if (dashMatch) return { company: normalize(dashMatch[1]), title: normalize(dashMatch[2]) };
+    const atMatch = primary.match(/^(.+?)\s+@\s+(.+)$/);
+    if (atMatch) return { title: normalize(atMatch[1]), company: normalize(atMatch[2]) };
+    return { company: '', title: primary };
+  };
   const inferCurrentRole = (headline: string): { title: string; company: string } => {
     const normalized = normalize(headline);
-    const atMatch = normalized.match(/^(.+?)\s+at\s+(.+)$/i);
+    const atMatch = normalized.match(/^(.+?)\s+(?:at|@)\s+(.+)$/i);
     if (atMatch) return { title: normalize(atMatch[1]), company: normalize(atMatch[2]) };
     const dotMatch = normalized.split(' · ');
     if (dotMatch.length >= 2) return { title: dotMatch[0], company: dotMatch.slice(1).join(' · ') };
@@ -843,32 +1261,62 @@ function extractRecruiterPeopleCardsInPage(listSource: string): RecruiterCandida
       || root.getAttribute('data-profile-urn')
       || '';
     const candidateId = profileUrl ? `url:${base64UrlEncode(profileUrl)}` : normalize(candidateIdAttr);
-
     const textLines = uniq(String((root as HTMLElement).innerText || '').split('\n'));
     const name = normalize(
-      profileLink?.textContent
-      || root.querySelector('[data-anonymize="person-name"], [data-test-person-name]')?.textContent
+      readText(root, [
+        '[data-test-row-lockup-full-name]',
+        '[data-anonymize="person-name"]',
+        '[data-test-person-name]',
+      ])
+      || profileLink?.textContent
       || textLines[0]
       || ''
     );
     if (!name) continue;
 
-    const connectionDegree = textLines.find(line => /(?:^|\s)(1st|2nd|3rd)(?:\s|$)/i.test(line)) || '';
+    const connectionDegree = normalize(
+      readText(root, [
+        '[data-test-lockup-degree]',
+        '[data-test-connection-degree]',
+      ])
+      || textLines.find(line => /(?:^|\s)(1st|2nd|3rd)(?:\s|$)|\d+\s*度人脉/i.test(line))
+      || ''
+    );
     const location = normalize(
-      root.querySelector('[data-anonymize="location"], [data-test-location]')?.textContent
-      || textLines.find(line => /,/.test(line) || /(united states|europe|singapore|london|berlin|dubai|remote)/i.test(line))
+      readText(root, [
+        '[data-test-row-lockup-location]',
+        '[data-anonymize="location"]',
+        '[data-test-location]',
+      ])
+      || textLines.find(line => /,/.test(line) || /(united states|europe|singapore|london|berlin|dubai|remote|新加坡)/i.test(line))
       || ''
     );
     const headline = normalize(
-      root.querySelector('[data-anonymize="headline"], [data-test-headline], [data-test-job-title]')?.textContent
+      readText(root, [
+        '[data-test-row-lockup-headline]',
+        '[data-anonymize="headline"]',
+        '[data-test-headline]',
+        '[data-test-job-title]',
+      ])
       || textLines.find(line => line !== name && line !== connectionDegree && line !== location)
       || ''
     );
+    const historyLine = readText(root, [
+      'div[data-test-history] li[data-test-description-description]',
+      'div[data-test-history] [data-test-description-description]',
+      'div[data-test-history] li',
+    ]);
+    const historyRole = parseHistoryLine(historyLine);
     const inferredRole = inferCurrentRole(headline);
-
-    const signalCandidates = textLines.filter(line => /open to work|shared|mutual|recently active|actively hiring|actively interviewing|skills?/i.test(line));
-    const matchSignals = uniq(signalCandidates).join('; ');
-    const openToWork = /open to work/i.test(`${headline} ${matchSignals}`) ? 'yes' : 'no';
+    const signalCandidates = [
+      readText(root, ['[data-test-interest-headline]']),
+      ...Array.from(root.querySelectorAll('button,[role="button"]'))
+        .map(node => normalize(node.textContent))
+        .filter(line => /(?:进入就业市场|open to work|mutual|好友|connections?|消息|views?|浏览|interested|active)/i.test(line)),
+      ...textLines.filter(line => /open to work|shared|mutual|recently active|actively hiring|actively interviewing|skills?|进入就业市场|好友|消息|浏览/i.test(line)),
+    ];
+    const matchSignals = summarize(signalCandidates);
+    const openToWork = /open to work|进入就业市场/i.test(`${headline} ${matchSignals}`) ? 'yes' : 'no';
 
     candidates.push({
       candidate_id: candidateId,
@@ -876,9 +1324,9 @@ function extractRecruiterPeopleCardsInPage(listSource: string): RecruiterCandida
       name,
       headline,
       location,
-      current_company: inferredRole.company,
-      current_title: inferredRole.title,
-      connection_degree: normalize(connectionDegree),
+      current_company: historyRole.company || inferredRole.company,
+      current_title: historyRole.title || inferredRole.title,
+      connection_degree: connectionDegree,
       open_to_work: openToWork,
       match_signals: matchSignals,
       list_source: listSource,
@@ -886,6 +1334,341 @@ function extractRecruiterPeopleCardsInPage(listSource: string): RecruiterCandida
   }
 
   return candidates;
+}
+
+async function extractRecruiterPeopleViaApisInPage(listSource: string): Promise<RecruiterCandidateSummary[]> {
+  const normalize = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
+  const uniq = (values: string[]) => [...new Set(values.map(value => normalize(value)).filter(Boolean))];
+  const normalizeSignal = (value: string) => {
+    const normalized = normalize(value);
+    if (!normalized) return '';
+    const mutualCount = normalized.match(/(\d+)\s*(?:位好友|好友|mutual connections?)/i);
+    if (mutualCount) return `${mutualCount[1]} mutual connections`;
+    if (/进入就业市场|open to work/i.test(normalized)) return 'open to work';
+    if (/极有可能有意向|likely interested/i.test(normalized)) return 'likely interested';
+    return normalized;
+  };
+  const summarize = (values: string[]) => {
+    const noisyActionPattern = /^(?:发消息给|message\s+\S|send message|send inmail|inmail\s+\S|view profile|查看资料|查看档案|邀请候选人|邀请)/i;
+    return [...new Set(values.map(value => normalizeSignal(value)).filter(Boolean).filter(value => !noisyActionPattern.test(value)))].join('; ');
+  };
+  const decodeRedirect = (href: string) => {
+    try {
+      const parsed = new URL(href, window.location.origin);
+      if (parsed.pathname === '/redir/redirect/') {
+        return parsed.searchParams.get('url') || href;
+      }
+      return parsed.toString();
+    } catch {
+      return href;
+    }
+  };
+  const inferCurrentRole = (headline: string): { title: string; company: string } => {
+    const normalized = normalize(headline);
+    const atMatch = normalized.match(/^(.+?)\s+at\s+(.+)$/i);
+    if (atMatch) return { title: normalize(atMatch[1]), company: normalize(atMatch[2]) };
+    const dotParts = normalized.split(' · ');
+    if (dotParts.length >= 2) return { title: dotParts[0], company: dotParts.slice(1).join(' · ') };
+    return { title: normalized, company: '' };
+  };
+  const normalizeNetworkDistance = (value: unknown): string => {
+    const raw = normalize(value);
+    const normalized = raw.toUpperCase();
+    if (!normalized) return '';
+    if (normalized === 'FIRST_DEGREE' || normalized === '1ST' || normalized === '1ST_DEGREE') return '1st';
+    if (normalized === 'SECOND_DEGREE' || normalized === '2ND' || normalized === '2ND_DEGREE') return '2nd';
+    if (normalized === 'THIRD_DEGREE' || normalized === '3RD' || normalized === '3RD_DEGREE') return '3rd';
+    const chineseDegree = raw.match(/([123])\s*度/);
+    if (chineseDegree) return `${chineseDegree[1]}${chineseDegree[1] === '1' ? 'st' : chineseDegree[1] === '2' ? 'nd' : 'rd'}`;
+    return raw;
+  };
+  const firstWorkExperience = (source: any): { company: string; title: string } => {
+    const list = Array.isArray(source?.workExperience)
+      ? source.workExperience
+      : Array.isArray(source?.positions)
+        ? source.positions
+        : [];
+    for (const entry of list) {
+      const company = normalize(entry?.companyName || entry?.company?.name || entry?.companyResolutionResult?.name);
+      const title = normalize(entry?.title || entry?.positionTitle);
+      if (company || title) return { company, title };
+    }
+    return { company: '', title: '' };
+  };
+  const parseListParam = (value: string): string[] => {
+    const normalized = normalize(value);
+    const match = normalized.match(/^List\((.*)\)$/);
+    const payload = match ? match[1] : normalized;
+    return payload.split(',').map(item => normalize(item)).filter(Boolean);
+  };
+  const parseMemberId = (urn: string): string => {
+    const normalized = normalize(urn);
+    if (!normalized) return '';
+    const tail = normalized.split(':').filter(Boolean).pop() || '';
+    return normalize(decodeURIComponent(tail));
+  };
+  const extractVisibleCards = (): RecruiterCandidateSummary[] => {
+    const base64UrlEncode = (value: string) => btoa(unescape(encodeURIComponent(value)))
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/g, '');
+    const pickProfileLink = (root: Element): HTMLAnchorElement | null => {
+      const direct = root.querySelector('a[data-test-link-to-profile-link="true"]') as HTMLAnchorElement | null;
+      if (direct?.href) return direct;
+      const links = Array.from(root.querySelectorAll('a[href]')) as HTMLAnchorElement[];
+      return links.find(link => /\/in\/|\/talent\/profile\//.test(link.href)) || null;
+    };
+    const readText = (root: Element, selectors: string[]): string => {
+      for (const selector of selectors) {
+        const value = normalize(root.querySelector(selector)?.textContent);
+        if (value) return value;
+      }
+      return '';
+    };
+    const parseHistoryLine = (value: string): { company: string; title: string } => {
+      const normalized = normalize(value);
+      if (!normalized) return { company: '', title: '' };
+      const [primary] = normalized.split(' · ').map(part => normalize(part));
+      if (!primary) return { company: '', title: '' };
+      const dashMatch = primary.match(/^(.+?)\s+-\s+(.+)$/);
+      if (dashMatch) return { company: normalize(dashMatch[1]), title: normalize(dashMatch[2]) };
+      const atMatch = primary.match(/^(.+?)\s+@\s+(.+)$/);
+      if (atMatch) return { title: normalize(atMatch[1]), company: normalize(atMatch[2]) };
+      return { company: '', title: primary };
+    };
+    const roots = new Set<Element>();
+    for (const link of Array.from(document.querySelectorAll('a[href*="/in/"], a[href*="/talent/profile/"]'))) {
+      const root = link.closest(
+        'li, article, [data-test-search-result-card], [data-testid*="candidate"], [data-urn], .artdeco-list__item',
+      ) || link.parentElement;
+      if (root) roots.add(root);
+    }
+
+    const candidates: RecruiterCandidateSummary[] = [];
+    for (const root of roots) {
+      const profileLink = pickProfileLink(root);
+      const profileUrl = profileLink ? decodeRedirect(profileLink.href) : '';
+      const candidateIdAttr = root.getAttribute('data-urn')
+        || root.getAttribute('data-member-urn')
+        || root.getAttribute('data-profile-urn')
+        || '';
+      const candidateId = profileUrl ? `url:${base64UrlEncode(profileUrl)}` : normalize(candidateIdAttr);
+      const textLines = uniq(String((root as HTMLElement).innerText || '').split('\n'));
+      const name = normalize(
+        readText(root, [
+          '[data-test-row-lockup-full-name]',
+          '[data-anonymize="person-name"]',
+          '[data-test-person-name]',
+        ])
+        || profileLink?.textContent
+        || textLines[0]
+        || ''
+      );
+      if (!name) continue;
+      const connectionDegree = normalize(
+        readText(root, [
+          '[data-test-lockup-degree]',
+          '[data-test-connection-degree]',
+        ])
+        || textLines.find(line => /(?:^|\s)(1st|2nd|3rd)(?:\s|$)|\d+\s*度人脉/i.test(line))
+        || ''
+      );
+      const location = normalize(
+        readText(root, [
+          '[data-test-row-lockup-location]',
+          '[data-anonymize="location"]',
+          '[data-test-location]',
+        ])
+        || textLines.find(line => /,/.test(line) || /(united states|europe|singapore|london|berlin|dubai|remote|新加坡)/i.test(line))
+        || ''
+      );
+      const headline = normalize(
+        readText(root, [
+          '[data-test-row-lockup-headline]',
+          '[data-anonymize="headline"]',
+          '[data-test-headline]',
+          '[data-test-job-title]',
+        ])
+        || textLines.find(line => line !== name && line !== connectionDegree && line !== location)
+        || ''
+      );
+      const historyLine = readText(root, [
+        'div[data-test-history] li[data-test-description-description]',
+        'div[data-test-history] [data-test-description-description]',
+        'div[data-test-history] li',
+      ]);
+      const historyRole = parseHistoryLine(historyLine);
+      const inferredRole = inferCurrentRole(headline);
+      const signalCandidates = [
+        readText(root, ['[data-test-interest-headline]']),
+        ...Array.from(root.querySelectorAll('button,[role="button"]'))
+          .map(node => normalize(node.textContent))
+          .filter(line => /(?:进入就业市场|open to work|mutual|好友|connections?|消息|views?|浏览|interested|active)/i.test(line)),
+        ...textLines.filter(line => /open to work|shared|mutual|recently active|actively hiring|actively interviewing|skills?|进入就业市场|好友|消息|浏览/i.test(line)),
+      ];
+      const matchSignals = summarize(signalCandidates);
+      const openToWork = /open to work|进入就业市场/i.test(`${headline} ${matchSignals}`) ? 'yes' : 'no';
+
+      candidates.push({
+        candidate_id: candidateId,
+        profile_url: profileUrl,
+        name,
+        headline,
+        location,
+        current_company: historyRole.company || inferredRole.company,
+        current_title: historyRole.title || inferredRole.title,
+        connection_degree: connectionDegree,
+        open_to_work: openToWork,
+        match_signals: matchSignals,
+        list_source: listSource,
+      });
+    }
+    return candidates;
+  };
+  const buildDomMap = () => {
+    const map = new Map<string, RecruiterCandidateSummary>();
+    const cards = extractVisibleCards();
+    for (const card of cards) {
+      const memberIdFromUrl = (() => {
+        try {
+          const parsed = new URL(card.profile_url, window.location.origin);
+          const talentMatch = parsed.pathname.match(/\/talent\/profile\/([^/?]+)/i);
+          if (talentMatch) return normalize(decodeURIComponent(talentMatch[1]));
+        } catch {}
+        return '';
+      })();
+      const candidateId = normalize(card.candidate_id);
+      if (candidateId) map.set(candidateId, card);
+      if (memberIdFromUrl) map.set(memberIdFromUrl, card);
+      if (card.profile_url) map.set(normalize(card.profile_url), card);
+    }
+    return map;
+  };
+  const readResourceUrl = (needle: string) => {
+    const resources = performance.getEntriesByType('resource').map((entry) => entry.name);
+    return [...resources].reverse().find((name) => name.includes(needle)) || '';
+  };
+
+  const profileUrl = readResourceUrl('/talent/api/talentProfiles');
+  if (!profileUrl) return extractVisibleCards();
+
+  const jsession = document.cookie.split(';').map((part) => part.trim())
+    .find((part) => part.startsWith('JSESSIONID='))?.slice('JSESSIONID='.length)
+    ?.replace(/^"|"$/g, '') || '';
+  const headers: Record<string, string> = { 'x-restli-protocol-version': '2.0.0' };
+  if (jsession) headers['csrf-token'] = jsession;
+
+  const profileRes = await fetch(profileUrl, { credentials: 'include', headers });
+  if (!profileRes.ok) return extractVisibleCards();
+
+  const payload = await profileRes.json() as {
+    results?: Record<string, any>;
+    elements?: any[];
+  };
+  const parsedProfileUrl = new URL(profileUrl, window.location.origin);
+  const orderedUrns = parseListParam(parsedProfileUrl.searchParams.get('ids') || '');
+  const domMap = buildDomMap();
+  const rows: RecruiterCandidateSummary[] = [];
+  const readPath = (source: any, path: string): string => {
+    const value = path.split('.').reduce<any>((current, part) => current?.[part], source);
+    if (value && typeof value === 'object') return '';
+    return normalize(value);
+  };
+  const pickFirst = (source: any, paths: string[]): string => {
+    for (const path of paths) {
+      const value = readPath(source, path);
+      if (value) return value;
+    }
+    return '';
+  };
+
+  const orderedProfiles = orderedUrns.length > 0
+    ? orderedUrns
+      .map((urn) => ({ urn, profile: payload?.results?.[urn] }))
+      .filter((entry) => entry.profile)
+    : Array.isArray(payload?.elements)
+      ? payload.elements.map((profile) => ({
+        urn: normalize(profile?.entityUrn),
+        profile,
+      }))
+      : [];
+
+  for (const { urn, profile } of orderedProfiles) {
+    if (!profile) continue;
+
+    const memberId = parseMemberId(profile.entityUrn || urn);
+    const dom = domMap.get(memberId) || domMap.get(normalize(profile.publicProfileUrl || '')) || null;
+    const name = normalize([profile.firstName, profile.lastName].filter(Boolean).join(' ')) || normalize(dom?.name);
+    if (!name) continue;
+
+    const profileUrlValue = normalize(dom?.profile_url) || (memberId
+      ? `https://www.linkedin.com/talent/profile/${encodeURIComponent(memberId)}`
+      : normalize(profile.publicProfileUrl));
+    const workExperience = firstWorkExperience(profile);
+    const headline = normalize(dom?.headline) || pickFirst(profile, [
+      'headline',
+      'profile.headline',
+      'member.headline',
+      'memberProfile.headline',
+      'defaultPosition.title',
+    ]);
+    const location = normalize(dom?.location) || pickFirst(profile, [
+      'location',
+      'locationName',
+      'geoLocationName',
+      'geo.locationName',
+      'profile.locationName',
+      'member.locationName',
+      'location.displayName',
+    ]);
+    const role = inferCurrentRole(headline);
+    const apiCurrentCompany = pickFirst(profile, [
+      'currentCompany.name',
+      'defaultPosition.companyName',
+      'profile.currentCompany.name',
+      'member.currentCompany.name',
+      'positionView.currentCompanyName',
+    ]);
+    const apiCurrentTitle = pickFirst(profile, [
+      'currentTitle',
+      'defaultPosition.title',
+      'profile.currentTitle',
+      'member.currentTitle',
+      'positionView.currentTitle',
+      'memberPreferences.titles.0',
+    ]);
+    const mutualCount = Number(profile?.highlights?.connections?.totalCount || 0);
+    const preferredLocation = normalize(
+      Object.values(profile?.memberPreferences?.geoLocationsResolutionResults || {})
+        .map((item: any) => item?.standardGeoStyleName)
+        .find(Boolean),
+    );
+    const connectionDegree = normalizeNetworkDistance(profile?.networkDistance || dom?.connection_degree);
+    const signalParts = [
+      ...(normalize(dom?.match_signals) ? normalize(dom?.match_signals).split(';') : []),
+      profile?.memberPreferences?.openToNewOpportunities ? 'open to work' : '',
+      profile?.signaledInterest?.signaledInterest ? 'signaled interest' : '',
+      mutualCount > 0 ? `${mutualCount} mutual connections` : '',
+      profile?.viewerCompanyFollowing?.followingViewerCompany ? 'follows your company' : '',
+      profile?.canSendInMail ? 'can send inmail' : '',
+    ];
+
+    rows.push({
+      candidate_id: memberId || normalize(dom?.candidate_id),
+      profile_url: profileUrlValue,
+      name,
+      headline,
+      location: location || preferredLocation,
+      current_company: normalize(dom?.current_company) || apiCurrentCompany || workExperience.company || role.company,
+      current_title: normalize(dom?.current_title) || apiCurrentTitle || workExperience.title || role.title,
+      connection_degree: connectionDegree,
+      open_to_work: profile?.memberPreferences?.openToNewOpportunities ? 'yes' : normalize(dom?.open_to_work) || 'no',
+      match_signals: summarize(signalParts),
+      list_source: listSource,
+    });
+  }
+
+  return rows.length ? rows : extractVisibleCards();
 }
 
 function extractRecruiterProfileInPage(candidateIdHint: string, listSource: string): RecruiterCandidateProfile | null {
@@ -1840,6 +2623,10 @@ function addRecruiterNoteInPage(
 export async function ensureRecruiterSurface(page: IPage, targetUrl: string): Promise<SurfaceDetectionResult> {
   await page.goto(targetUrl);
   await page.wait({ time: 2 });
+  return detectRecruiterSurface(page);
+}
+
+export async function detectRecruiterSurface(page: IPage): Promise<SurfaceDetectionResult> {
   const surface = await page.evaluate(buildPageEval(detectLinkedinSurfaceInPage));
   if (surface.loginRequired) {
     throw new AuthRequiredError('linkedin.com', 'LinkedIn Recruiter requires an active signed-in browser session');
@@ -1851,6 +2638,20 @@ export async function ensureRecruiterSurface(page: IPage, targetUrl: string): Pr
     );
   }
   return surface;
+}
+
+export async function primeRecruiterSearchHitsCapture(page: IPage): Promise<void> {
+  if (!page.cdp) return;
+  try {
+    await page.cdp('Page.addScriptToEvaluateOnNewDocument', {
+      source: `(${generateInterceptorJs(JSON.stringify('talentRecruiterSearchHits'), {
+        arrayName: '__opencli_xhr',
+        patchGuard: '__opencli_interceptor_patched',
+      })})()`,
+    });
+  } catch {
+    // Best effort only. We still have page.installInterceptor as a fallback.
+  }
 }
 
 export async function ensureLinkedinSession(page: IPage, targetUrl: string): Promise<SurfaceDetectionResult> {
@@ -1866,6 +2667,14 @@ export async function ensureLinkedinSession(page: IPage, targetUrl: string): Pro
 export async function trySeedRecruiterSearch(page: IPage, input: RecruiterPeopleSearchInput): Promise<void> {
   await page.evaluate(buildPageEval(seedRecruiterSearchInPage, input));
   await page.wait({ time: 1 });
+}
+
+export async function probeRecruiterSearchState(
+  page: IPage,
+  input: RecruiterPeopleSearchInput,
+): Promise<RecruiterSearchStateProbe> {
+  const result = await page.evaluate(buildPageEval(inspectRecruiterSearchStateInPage, input));
+  return result as RecruiterSearchStateProbe;
 }
 
 export async function collectRecruiterPeople(
@@ -1896,6 +2705,67 @@ export async function collectRecruiterPeople(
     rank: input.start + index + 1,
     ...candidate,
   }));
+}
+
+export async function collectRecruiterPeopleViaCurrentSearchApis(
+  page: IPage,
+  input: RecruiterPeopleSearchInput,
+  listSource = 'search',
+  options?: { skipReseed?: boolean },
+): Promise<RecruiterCandidateSummary[]> {
+  try {
+    await page.installInterceptor('talentRecruiterSearchHits');
+  } catch {
+    // Non-fatal: current-page interception is best-effort.
+  }
+  let collected: RecruiterCandidateSummary[] = [];
+  const targetCount = input.start + input.limit;
+  const needsMoreEnrichment = (items: RecruiterCandidateSummary[]) => items
+    .slice(input.start, input.start + input.limit)
+    .some(item => !(normalizeWhitespace(item.headline)
+      || normalizeWhitespace(item.location)
+      || normalizeWhitespace(item.current_company)
+      || normalizeWhitespace(item.current_title)));
+
+  for (let i = 0; i < 4; i++) {
+    if (i > 0 && !options?.skipReseed) {
+      try {
+        await trySeedRecruiterSearch(page, input);
+      } catch {
+        // Keep going with any data we already have.
+      }
+    }
+    const intercepted = await page.getInterceptedRequests().catch(() => []);
+    const fromSearchHits = Array.isArray(intercepted)
+      ? intercepted.flatMap((payload) => extractRecruiterPeopleFromSearchHitsPayload(payload, listSource))
+      : [];
+    collected = mergeCandidates(collected, fromSearchHits);
+    const batch = await page.evaluate(buildPageEval(extractRecruiterPeopleViaApisInPage, listSource));
+    collected = mergeCandidates(collected, Array.isArray(batch) ? batch as RecruiterCandidateSummary[] : []);
+    const filtered = applyVisibleFilters(collected, input);
+    const usable = filtered.length > 0 ? filtered : collected;
+    const sliced = usable.slice(input.start, input.start + input.limit);
+    if (sliced.length >= input.limit && !needsMoreEnrichment(usable)) {
+      return sliced.map((candidate, index) => ({
+        rank: input.start + index + 1,
+        ...candidate,
+      }));
+    }
+    if (usable.length >= targetCount && i >= 2 && !needsMoreEnrichment(usable)) break;
+    await page.autoScroll({ times: 1, delayMs: 1200 });
+    await page.wait({ time: 1 });
+  }
+
+  const filtered = applyVisibleFilters(collected, input);
+  const usable = filtered.length > 0 ? filtered : collected;
+  const sliced = usable.slice(input.start, input.start + input.limit);
+  if (sliced.length > 0) {
+    return sliced.map((candidate, index) => ({
+      rank: input.start + index + 1,
+      ...candidate,
+    }));
+  }
+  return collectRecruiterPeople(page, input, listSource);
 }
 
 export async function extractRecruiterProfile(
@@ -2080,6 +2950,7 @@ export const __test__ = {
   normalizeWhitespace,
   parseCsvArg,
   toYesNo,
+  queriesLookCompatible,
   canonicalizeLinkedinUrl,
   decodeLinkedinRedirect,
   candidateIdFromProfileUrl,
@@ -2091,6 +2962,9 @@ export const __test__ = {
   buildRecruiterInboxThreadUrl,
   buildRecruiterSearchUrl,
   summarizeSignals,
+  formatNetworkDistance,
+  firstCurrentWorkExperience,
+  extractRecruiterPeopleFromSearchHitsPayload,
   mergeCandidates,
   mergeInboxThreads,
   summarizeRecruiterPeopleStats,

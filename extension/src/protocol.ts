@@ -20,10 +20,14 @@ export interface Command {
   workspace?: string;
   /** URL to navigate to (navigate action) */
   url?: string;
-  /** Sub-operation for tabs: list, new, close, select */
-  op?: 'list' | 'new' | 'close' | 'select';
+  /** Sub-operation for tabs: list, new, close, select, find, adopt */
+  op?: 'list' | 'new' | 'close' | 'select' | 'find' | 'adopt';
   /** Tab index for tabs select/close */
   index?: number;
+  /** URL substring filter for tabs find */
+  urlContains?: string;
+  /** Only include currently active browser tabs for tabs find */
+  activeOnly?: boolean;
   /** Cookie domain filter */
   domain?: string;
   /** Screenshot format: png (default) or jpeg */

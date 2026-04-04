@@ -117,6 +117,7 @@ type AutomationSession = {
   windowId: number;
   idleTimer: ReturnType<typeof setTimeout> | null;
   idleDeadlineAt: number;
+  adopted?: boolean;
 };
 
 const automationSessions = new Map<string, AutomationSession>();
@@ -129,6 +130,10 @@ function getWorkspaceKey(workspace?: string): string {
 function resetWindowIdleTimer(workspace: string): void {
   const session = automationSessions.get(workspace);
   if (!session) return;
+  if (session.adopted) {
+    session.idleDeadlineAt = Number.POSITIVE_INFINITY;
+    return;
+  }
   if (session.idleTimer) clearTimeout(session.idleTimer);
   session.idleDeadlineAt = Date.now() + WINDOW_IDLE_TIMEOUT;
   session.idleTimer = setTimeout(async () => {
@@ -173,6 +178,7 @@ async function getAutomationWindow(workspace: string): Promise<number> {
     windowId: win.id!,
     idleTimer: null,
     idleDeadlineAt: Date.now() + WINDOW_IDLE_TIMEOUT,
+    adopted: false,
   };
   automationSessions.set(workspace, session);
   console.log(`[opencli] Created automation window ${session.windowId} (${workspace})`);
@@ -303,13 +309,13 @@ function isTargetUrl(currentUrl: string | undefined, targetUrl: string): boolean
   return normalizeUrlForComparison(currentUrl) === normalizeUrlForComparison(targetUrl);
 }
 
-function setWorkspaceSession(workspace: string, session: Pick<AutomationSession, 'windowId'>): void {
+function setWorkspaceSession(workspace: string, session: Pick<AutomationSession, 'windowId' | 'adopted'>): void {
   const existing = automationSessions.get(workspace);
   if (existing?.idleTimer) clearTimeout(existing.idleTimer);
   automationSessions.set(workspace, {
     ...session,
     idleTimer: null,
-    idleDeadlineAt: Date.now() + WINDOW_IDLE_TIMEOUT,
+    idleDeadlineAt: session.adopted ? Number.POSITIVE_INFINITY : Date.now() + WINDOW_IDLE_TIMEOUT,
   });
 }
 
@@ -378,6 +384,11 @@ async function listAutomationTabs(workspace: string): Promise<chrome.tabs.Tab[]>
     automationSessions.delete(workspace);
     return [];
   }
+}
+
+function isAutomationWindow(windowId: number | undefined): boolean {
+  if (windowId === undefined) return false;
+  return [...automationSessions.values()].some((session) => session.windowId === windowId);
 }
 
 async function listAutomationWebTabs(workspace: string): Promise<chrome.tabs.Tab[]> {
@@ -542,6 +553,49 @@ async function handleTabs(cmd: Command, workspace: string): Promise<Result> {
       await chrome.tabs.update(target.id, { active: true });
       return { id: cmd.id, ok: true, data: { selected: target.id } };
     }
+    case 'find': {
+      const tabs = await chrome.tabs.query(cmd.activeOnly ? { active: true } : {});
+      const needle = String(cmd.urlContains || '').trim();
+      const matches = tabs
+        .filter((tab) => !isAutomationWindow(tab.windowId))
+        .filter((tab) => isDebuggableUrl(tab.url))
+        .filter((tab) => !needle || String(tab.url || '').includes(needle))
+        .map((tab) => ({
+          tabId: tab.id,
+          windowId: tab.windowId,
+          url: tab.url,
+          title: tab.title,
+          active: tab.active,
+      }));
+      return { id: cmd.id, ok: true, data: matches };
+    }
+    case 'adopt': {
+      if (cmd.tabId === undefined) {
+        return { id: cmd.id, ok: false, error: 'Missing tabId' };
+      }
+      let tab: chrome.tabs.Tab;
+      try {
+        tab = await chrome.tabs.get(cmd.tabId);
+      } catch {
+        return { id: cmd.id, ok: false, error: `Tab ${cmd.tabId} no longer exists` };
+      }
+      if (!isDebuggableUrl(tab.url)) {
+        return { id: cmd.id, ok: false, error: `Tab ${cmd.tabId} URL is not debuggable (${tab.url})` };
+      }
+      if (tab.windowId === undefined) {
+        return { id: cmd.id, ok: false, error: `Tab ${cmd.tabId} has no windowId` };
+      }
+      setWorkspaceSession(workspace, {
+        windowId: tab.windowId,
+        adopted: true,
+      });
+      await chrome.tabs.update(cmd.tabId, { active: true });
+      return {
+        id: cmd.id,
+        ok: true,
+        data: { adopted: cmd.tabId, windowId: tab.windowId },
+      };
+    }
     default:
       return { id: cmd.id, ok: false, error: `Unknown tabs op: ${cmd.op}` };
   }
@@ -598,15 +652,32 @@ const CDP_ALLOWLIST = new Set([
   // Page metrics & screenshots
   'Page.getLayoutMetrics',
   'Page.captureScreenshot',
+  'Page.addScriptToEvaluateOnNewDocument',
+  'Page.removeScriptToEvaluateOnNewDocument',
   // Runtime.enable needed for CDP attach setup (Runtime.evaluate goes through 'exec' action)
   'Runtime.enable',
   // Emulation (used by screenshot full-page)
   'Emulation.setDeviceMetricsOverride',
   'Emulation.clearDeviceMetricsOverride',
+  // Network is handled through OpenCLI pseudo-methods below.
 ]);
 
 async function handleCdp(cmd: Command, workspace: string): Promise<Result> {
   if (!cmd.cdpMethod) return { id: cmd.id, ok: false, error: 'Missing cdpMethod' };
+  if (cmd.cdpMethod === 'OpenCLI.startNetworkCapture') {
+    const tabId = await resolveTabId(cmd.tabId, workspace);
+    const patterns = Array.isArray(cmd.cdpParams?.patterns)
+      ? cmd.cdpParams?.patterns.filter((value): value is string => typeof value === 'string')
+      : [];
+    await executor.startNetworkCapture(tabId, patterns);
+    return { id: cmd.id, ok: true, data: { started: true, patterns } };
+  }
+  if (cmd.cdpMethod === 'OpenCLI.getCapturedNetwork') {
+    const tabId = await resolveTabId(cmd.tabId, workspace);
+    const clear = !!cmd.cdpParams?.clear;
+    const data = executor.getCapturedNetwork(tabId, { clear });
+    return { id: cmd.id, ok: true, data };
+  }
   if (!CDP_ALLOWLIST.has(cmd.cdpMethod)) {
     return { id: cmd.id, ok: false, error: `CDP method not permitted: ${cmd.cdpMethod}` };
   }
@@ -628,10 +699,12 @@ async function handleCdp(cmd: Command, workspace: string): Promise<Result> {
 async function handleCloseWindow(cmd: Command, workspace: string): Promise<Result> {
   const session = automationSessions.get(workspace);
   if (session) {
-    try {
-      await chrome.windows.remove(session.windowId);
-    } catch {
-      // Window may already be closed
+    if (!session.adopted) {
+      try {
+        await chrome.windows.remove(session.windowId);
+      } catch {
+        // Window may already be closed
+      }
     }
     if (session.idleTimer) clearTimeout(session.idleTimer);
     automationSessions.delete(workspace);
@@ -657,8 +730,9 @@ async function handleSessions(cmd: Command): Promise<Result> {
   const data = await Promise.all([...automationSessions.entries()].map(async ([workspace, session]) => ({
     workspace,
     windowId: session.windowId,
+    adopted: !!session.adopted,
     tabCount: (await chrome.tabs.query({ windowId: session.windowId })).filter((tab) => isDebuggableUrl(tab.url)).length,
-    idleMsRemaining: Math.max(0, session.idleDeadlineAt - now),
+    idleMsRemaining: session.adopted ? null : Math.max(0, session.idleDeadlineAt - now),
   })));
   return { id: cmd.id, ok: true, data };
 }
@@ -681,9 +755,10 @@ export const __test__ = {
     }
     setWorkspaceSession(workspace, {
       windowId,
+      adopted: false,
     });
   },
-  setSession: (workspace: string, session: { windowId: number }) => {
+  setSession: (workspace: string, session: { windowId: number; adopted?: boolean }) => {
     setWorkspaceSession(workspace, session);
   },
 };

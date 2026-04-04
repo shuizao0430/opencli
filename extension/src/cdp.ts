@@ -7,6 +7,33 @@
  */
 
 const attached = new Set<number>();
+type CapturedNetworkEntry = {
+  requestId: string;
+  url: string;
+  method?: string;
+  type?: string;
+  status?: number;
+  mimeType?: string;
+  body?: string;
+  base64Encoded?: boolean;
+  error?: string;
+};
+
+type NetworkCaptureState = {
+  patterns: string[];
+  entries: Map<string, CapturedNetworkEntry>;
+};
+
+const networkCaptures = new Map<number, NetworkCaptureState>();
+
+function matchesNetworkPattern(url: string | undefined, patterns: string[]): boolean {
+  const needle = String(url ?? '');
+  return patterns.some((pattern) => needle.includes(pattern));
+}
+
+function getNetworkState(tabId: number): NetworkCaptureState | undefined {
+  return networkCaptures.get(tabId);
+}
 
 /** Check if a URL can be attached via CDP — only allow http(s) and blank pages. */
 function isDebuggableUrl(url?: string): boolean {
@@ -231,15 +258,104 @@ export async function setFileInputFiles(
 export async function detach(tabId: number): Promise<void> {
   if (!attached.has(tabId)) return;
   attached.delete(tabId);
+  networkCaptures.delete(tabId);
   try { await chrome.debugger.detach({ tabId }); } catch { /* ignore */ }
+}
+
+export async function startNetworkCapture(tabId: number, patterns: string[]): Promise<void> {
+  await ensureAttached(tabId);
+  await chrome.debugger.sendCommand({ tabId }, 'Network.enable');
+  networkCaptures.set(tabId, {
+    patterns: patterns.filter(Boolean),
+    entries: new Map(),
+  });
+}
+
+export function getCapturedNetwork(
+  tabId: number,
+  options: { clear?: boolean } = {},
+): CapturedNetworkEntry[] {
+  const state = getNetworkState(tabId);
+  if (!state) return [];
+  const entries = [...state.entries.values()];
+  if (options.clear) state.entries.clear();
+  return entries;
+}
+
+async function handleNetworkEvent(
+  source: chrome.debugger.Debuggee,
+  method: string,
+  params?: Record<string, unknown>,
+): Promise<void> {
+  const tabId = source.tabId;
+  if (!tabId) return;
+  const state = getNetworkState(tabId);
+  if (!state) return;
+
+  if (method === 'Network.requestWillBeSent') {
+    const requestId = String(params?.requestId ?? '');
+    const request = params?.request as { url?: string; method?: string } | undefined;
+    if (!requestId || !matchesNetworkPattern(request?.url, state.patterns)) return;
+    state.entries.set(requestId, {
+      requestId,
+      url: request?.url ?? '',
+      method: request?.method,
+      type: typeof params?.type === 'string' ? params.type : undefined,
+    });
+    return;
+  }
+
+  if (method === 'Network.responseReceived') {
+    const requestId = String(params?.requestId ?? '');
+    const response = params?.response as { url?: string; status?: number; mimeType?: string } | undefined;
+    const existing = state.entries.get(requestId);
+    if (!existing) {
+      if (!matchesNetworkPattern(response?.url, state.patterns)) return;
+      state.entries.set(requestId, {
+        requestId,
+        url: response?.url ?? '',
+        status: response?.status,
+        mimeType: response?.mimeType,
+        type: typeof params?.type === 'string' ? params.type : undefined,
+      });
+      return;
+    }
+    existing.url = response?.url ?? existing.url;
+    existing.status = response?.status ?? existing.status;
+    existing.mimeType = response?.mimeType ?? existing.mimeType;
+    existing.type = typeof params?.type === 'string' ? params.type : existing.type;
+    return;
+  }
+
+  if (method === 'Network.loadingFinished') {
+    const requestId = String(params?.requestId ?? '');
+    const existing = state.entries.get(requestId);
+    if (!existing || existing.body !== undefined || existing.error) return;
+    try {
+      const bodyResult = await chrome.debugger.sendCommand({ tabId }, 'Network.getResponseBody', {
+        requestId,
+      }) as { body?: string; base64Encoded?: boolean };
+      existing.body = bodyResult.body ?? '';
+      existing.base64Encoded = !!bodyResult.base64Encoded;
+    } catch (error) {
+      existing.error = error instanceof Error ? error.message : String(error);
+    }
+  }
 }
 
 export function registerListeners(): void {
   chrome.tabs.onRemoved.addListener((tabId) => {
     attached.delete(tabId);
+    networkCaptures.delete(tabId);
   });
   chrome.debugger.onDetach.addListener((source) => {
-    if (source.tabId) attached.delete(source.tabId);
+    if (source.tabId) {
+      attached.delete(source.tabId);
+      networkCaptures.delete(source.tabId);
+    }
+  });
+  chrome.debugger.onEvent.addListener((source, method, params) => {
+    void handleNetworkEvent(source, method, params as Record<string, unknown> | undefined);
   });
   // Invalidate attached cache when tab URL changes to non-debuggable
   chrome.tabs.onUpdated.addListener(async (tabId, info) => {
@@ -248,3 +364,9 @@ export function registerListeners(): void {
     }
   });
 }
+
+export const __test__ = {
+  startNetworkCapture,
+  getCapturedNetwork,
+  handleNetworkEvent,
+};
