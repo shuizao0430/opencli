@@ -1,5 +1,9 @@
 import { cli, Strategy } from '../../registry.js';
-import { collectRecruiterSavedSearches, ensureRecruiterSurface } from './recruiter-utils.js';
+import {
+  buildRecruiterSavedSearchesUrl,
+  collectRecruiterSavedSearches,
+  ensureRecruiterSurface,
+} from './recruiter-utils.js';
 
 cli({
   site: 'linkedin',
@@ -11,7 +15,7 @@ cli({
   args: [],
   columns: ['rank', 'search_id', 'name', 'query', 'cadence', 'result_count', 'url'],
   func: async (page) => {
-    await ensureRecruiterSurface(page, 'https://www.linkedin.com/talent/saved-searches');
+    await ensureRecruiterSurface(page, buildRecruiterSavedSearchesUrl());
     return collectRecruiterSavedSearches(page);
   },
 });

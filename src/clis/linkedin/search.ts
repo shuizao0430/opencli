@@ -156,12 +156,20 @@ async function resolveCompanyIds(page: IPage, input: unknown): Promise<string[]>
 
   const resolved = await page.evaluate(`(async () => {
     const targets = ${JSON.stringify(names)};
+    const labels = {
+      allFilters: ['All filters', '所有筛选条件', '所有筛选', '全部筛选条件', '全部筛选'],
+      addCompany: ['Add a company', '添加公司', '新增公司'],
+    };
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
     const normalize = (v) => (v || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+    const includesAny = (value, list) => {
+      const normalized = normalize(value);
+      return list.some(label => normalized.includes(normalize(label)));
+    };
 
     // Open "All filters" panel to expose company filter inputs
     const allBtn = [...document.querySelectorAll('button')]
-      .find(b => ((b.innerText || '').trim().replace(/\\s+/g, ' ')) === 'All filters');
+      .find(b => includesAny((b.innerText || '').trim().replace(/\\s+/g, ' '), labels.allFilters));
     if (allBtn) { allBtn.click(); await sleep(300); }
 
     const getCompanyMap = () => {
@@ -188,7 +196,7 @@ async function resolveCompanyIds(page: IPage, input: unknown): Promise<string[]>
       let found = match(map, name);
       if (!found) {
         const inp = [...document.querySelectorAll('input')]
-          .find(el => el.getAttribute('aria-label') === 'Add a company');
+          .find(el => includesAny(el.getAttribute('aria-label') || el.getAttribute('placeholder') || '', labels.addCompany));
         if (inp) {
           inp.focus();
           inp.value = name;
@@ -394,7 +402,25 @@ cli({
     if (location) searchParams.set('location', location);
 
     await page.goto(`https://www.linkedin.com/jobs/search/?${searchParams.toString()}`);
-    await page.wait({ text: 'Jobs', timeout: 10 });
+    let jobsSurfaceReady = false;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      jobsSurfaceReady = Boolean(await page.evaluate(`(() => {
+        const path = String(window.location.pathname || '');
+        if (!path.includes('/jobs')) return false;
+        const labels = ${JSON.stringify(['Jobs', '职位', '工作机会', '招聘'])};
+        const bodyText = String(document.body?.innerText || '').replace(/\\s+/g, ' ').toLowerCase();
+        return labels.some(label => bodyText.includes(label.toLowerCase()))
+          || Boolean(document.querySelector('main [data-view-name*="job"], .jobs-search-results-list, .jobs-search__results-list'));
+      })()`));
+      if (jobsSurfaceReady) break;
+      await page.wait({ time: 0.5 });
+    }
+    if (!jobsSurfaceReady) {
+      throw new CommandExecutionError(
+        'LinkedIn jobs search surface not ready',
+        'Open the LinkedIn jobs page in Chrome and make sure the jobs results list is visible before retrying.',
+      );
+    }
     const companyIds = await resolveCompanyIds(page, kwargs.company);
 
     const input: SearchInput = {

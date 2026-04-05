@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { getRegistry } from '../../registry.js';
 import './profile.js';
 
-const { resolveProfileUrl } = await import('./profile.js').then((m) => (m as any).__test__);
+const { resolveProfileUrl, chooseBestProfileTab } = await import('./profile.js').then((m) => (m as any).__test__);
 
 describe('linkedin profile adapter', () => {
   const command = getRegistry().get('linkedin/profile');
@@ -53,5 +53,14 @@ describe('resolveProfileUrl', () => {
     expect(resolveProfileUrl('ACoAAA123XYZ', undefined)).toBe(
       'https://www.linkedin.com/talent/profile/ACoAAA123XYZ',
     );
+  });
+
+  it('prefers an active tab that exactly matches the target profile url', () => {
+    const profileUrl = 'https://www.linkedin.com/talent/profile/ACoAAA123XYZ?project=1';
+    expect(chooseBestProfileTab([
+      { tabId: 1, url: 'https://www.linkedin.com/talent/profile/other', active: true },
+      { tabId: 2, url: profileUrl, active: true },
+      { tabId: 3, url: profileUrl, active: false },
+    ], profileUrl)).toEqual({ tabId: 2, url: profileUrl, active: true });
   });
 });

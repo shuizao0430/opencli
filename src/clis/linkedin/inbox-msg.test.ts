@@ -27,16 +27,27 @@ describe('linkedin inbox-msg adapter', () => {
 
   it('resolves a direct recruiter thread url from conversation id', () => {
     expect(resolveInboxTarget('conv-123', undefined, undefined)).toBe(
-      'https://www.linkedin.com/talent/messages?conversationId=conv-123',
+      'https://www.linkedin.com/talent/inbox/0/main/id/conv-123',
     );
   });
 
-  it('falls back to recruiter inbox when matching by candidate or profile', () => {
-    expect(resolveInboxTarget('', 'url:abc', undefined)).toBe(
-      'https://www.linkedin.com/talent/messages',
+  it('falls back to recruiter profile messages when matching a recruiter profile target', () => {
+    expect(resolveInboxTarget(
+      '',
+      'url:aHR0cHM6Ly93d3cubGlua2VkaW4uY29tL3RhbGVudC9wcm9maWxlL0FFTUFBQUpsMXhVQnd1WFpheHFtc2RvZnRSaENVM21uVDM4RlI3OD9wcm9qZWN0PTM3NjEyNDk0NiZ0cms9UFJPSkVDVF9QSVBFTElORQ',
+      undefined,
+    )).toBe(
+      'https://www.linkedin.com/talent/profile/AEMAAAJl1xUBwuXZaxqmsdoftRhCU3mnT38FR78/messages?project=376124946',
     );
     expect(resolveInboxTarget('', '', 'https://www.linkedin.com/in/jane-doe/')).toBe(
-      'https://www.linkedin.com/talent/messages',
+      'https://www.linkedin.com/talent/inbox/0/main',
+    );
+    expect(resolveInboxTarget(
+      '',
+      '',
+      'https://www.linkedin.com/talent/profile/AEMAAAJl1xUBwuXZaxqmsdoftRhCU3mnT38FR78?project=376124946&trk=PROJECT_PIPELINE',
+    )).toBe(
+      'https://www.linkedin.com/talent/profile/AEMAAAJl1xUBwuXZaxqmsdoftRhCU3mnT38FR78/messages?project=376124946&trk=PROJECT_PIPELINE',
     );
   });
 });

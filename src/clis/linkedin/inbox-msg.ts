@@ -3,6 +3,7 @@ import { cli, Strategy } from '../../registry.js';
 import {
   buildRecruiterInboxThreadUrl,
   buildRecruiterInboxUrl,
+  buildRecruiterProfileMessagesUrl,
   ensureRecruiterSurface,
   readRecruiterInboxMessages,
 } from './recruiter-utils.js';
@@ -17,7 +18,9 @@ function resolveInboxTarget(
 
   const normalizedCandidateId = String(candidateId ?? '').trim();
   const normalizedProfileUrl = String(profileUrl ?? '').trim();
-  if (normalizedCandidateId || normalizedProfileUrl) return buildRecruiterInboxUrl();
+  if (normalizedCandidateId || normalizedProfileUrl) {
+    return buildRecruiterProfileMessagesUrl(normalizedCandidateId, normalizedProfileUrl) || buildRecruiterInboxUrl();
+  }
 
   throw new ArgumentError('conversation-id, --candidate-id, or --profile-url is required');
 }

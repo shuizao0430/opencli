@@ -9,6 +9,7 @@ import {
   primeRecruiterSearchHitsCapture,
   probeRecruiterSearchState,
   trySeedRecruiterSearch,
+  trySeedRecruiterSearchInteractively,
   type RecruiterPeopleSearchInput,
 } from './recruiter-utils.js';
 
@@ -144,6 +145,10 @@ cli({
     const shouldReuseCurrentSearch = Boolean(probe?.shouldReuseCurrentSearch);
     if (!shouldReuseCurrentSearch) {
       await trySeedRecruiterSearch(page, input);
+      const afterDomSeed = await probeRecruiterSearchState(page, input).catch(() => null);
+      if (!afterDomSeed?.hasVisibleResults && !afterDomSeed?.hasSearchApiTraffic) {
+        await trySeedRecruiterSearchInteractively(page, input).catch(() => false);
+      }
     }
     return collectRecruiterPeopleViaCurrentSearchApis(page, input, 'search', {
       skipReseed: shouldReuseCurrentSearch,

@@ -44,10 +44,10 @@ describe('linkedin batch-reply adapter', () => {
       profileUrl: 'https://www.linkedin.com/in/fallback/',
     });
     expect(resolveBatchReplyTargetUrl(targets[0])).toBe(
-      'https://www.linkedin.com/talent/messages?conversationId=conv-3',
+      'https://www.linkedin.com/talent/inbox/0/main/id/conv-3',
     );
     expect(resolveBatchReplyTargetUrl({ candidateId: 'candidate-a' })).toBe(
-      'https://www.linkedin.com/talent/messages',
+      'https://www.linkedin.com/talent/inbox/0/main',
     );
   });
 });

@@ -1,6 +1,7 @@
 import { ArgumentError } from '../../errors.js';
 import { cli, Strategy } from '../../registry.js';
 import {
+  adoptLinkedinTab,
   ensureLinkedinSession,
   resolveRecruiterProfileUrl,
   sendRecruiterMessage,
@@ -31,6 +32,7 @@ cli({
     if (!text) throw new ArgumentError('text is required');
 
     const targetUrl = resolveTargetUrl(candidateId, String(kwargs['profile-url'] ?? '').trim() || undefined);
+    await adoptLinkedinTab(page, targetUrl, ['/talent/profile/', '/in/']);
     await ensureLinkedinSession(page, targetUrl);
     return [await sendRecruiterMessage(page, candidateId, text)];
   },

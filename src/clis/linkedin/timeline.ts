@@ -1,6 +1,7 @@
 import { cli, Strategy } from '../../registry.js';
 import type { IPage } from '../../types.js';
 import { AuthRequiredError, EmptyResultError } from '../../errors.js';
+import { adoptLinkedinTab } from './recruiter-utils.js';
 
 interface TimelinePost {
   rank?: number;
@@ -18,6 +19,11 @@ interface TimelinePost {
 interface ExtractedBatch {
   loginRequired?: boolean;
   posts?: TimelinePost[];
+}
+
+function looksLikeLinkedinFeedUrl(value: unknown): boolean {
+  const normalized = normalizeWhitespace(value).toLowerCase();
+  return normalized.includes('linkedin.com') && /\/feed\/?(?:[?#]|$)/i.test(normalized);
 }
 
 function normalizeWhitespace(value: unknown): string {
@@ -481,6 +487,200 @@ async function extractVisiblePosts(page: IPage): Promise<ExtractedBatch> {
   })()`);
 }
 
+async function extractLocalizedFeedPosts(page: IPage): Promise<ExtractedBatch> {
+  return page.evaluate(`(function () {
+    function normalize(value) {
+      return String(value || '').replace(/\\s+/g, ' ').trim();
+    }
+    function splitBlocks(text) {
+      var lines = String(text || '').split('\\n');
+      var blocks = [];
+      var current = [];
+      var i;
+      var line;
+      for (i = 0; i < lines.length; i += 1) {
+        line = normalize(lines[i]);
+        if (!line) {
+          if (current.length) {
+            blocks.push(normalize(current.join(' ')));
+            current = [];
+          }
+          continue;
+        }
+        current.push(line);
+      }
+      if (current.length) blocks.push(normalize(current.join(' ')));
+      return blocks;
+    }
+    function parseMetric(value) {
+      var raw = normalize(value).toLowerCase();
+      var match;
+      if (!raw) return 0;
+      match = raw.replace(/,/g, '').match(/(\\d+(?:\\.\\d+)?)(k|m)?/i);
+      if (!match) return 0;
+      if ((match[2] || '').toLowerCase() === 'k') return Math.round(Number(match[1]) * 1000);
+      if ((match[2] || '').toLowerCase() === 'm') return Math.round(Number(match[1]) * 1000000);
+      return Math.round(Number(match[1]));
+    }
+    function isFeedMarker(value) {
+      var normalized = normalize(value);
+      return normalized === '信息流动态' || normalized === 'Feed post';
+    }
+    function isTimestamp(value) {
+      return /^\\d+\\s*(?:s|m|h|d|w|mo|yr|min|秒|分钟|小時|小时|天|周|星期|个月|月|年)(?:\\s*[•·])?$/i.test(normalize(value));
+    }
+    function isBadge(value) {
+      return /^(?:[•·]\\s*)?(?:1st|2nd|3rd|degree connection|[123]\\s*度)$/i.test(normalize(value));
+    }
+    function isMeta(value) {
+      return /^(?:推广|显示译文|…\\s*更多|更多|下载|关注)$/i.test(normalize(value));
+    }
+    function isEngagement(value) {
+      return /(reactions?|comments?|reposts?|次回应|条评论|次转发)/i.test(normalize(value));
+    }
+    function isFooterAction(value) {
+      return /^(?:赞|评论|转发|发送|like|comment|repost|send|reply)$/i.test(normalize(value));
+    }
+    function looksLikeAuthorCandidate(value) {
+      var normalized = normalize(value);
+      return Boolean(
+        normalized
+        && !isBadge(normalized)
+        && !isTimestamp(normalized)
+        && !isMeta(normalized)
+        && !isEngagement(normalized)
+        && !isFooterAction(normalized)
+        && !/^(?:\\d[\\d,]*\\s*(?:位关注者|followers?))$/i.test(normalized)
+      );
+    }
+    function stripBody(value) {
+      return normalize(String(value || '')
+        .replace(/\\s+显示译文/g, '')
+        .replace(/\\s+…\\s*更多/g, '')
+        .replace(/\\s+\\d[\\d,]*\\s*次回应[\\s\\S]*$/i, '')
+        .replace(/\\s+\\d[\\d,]*\\s*条评论[\\s\\S]*$/i, '')
+        .replace(/\\s+\\d[\\d,]*\\s*次转发[\\s\\S]*$/i, '')
+        .replace(/\\s+赞\\s+评论\\s+转发\\s+发送[\\s\\S]*$/i, '')
+      );
+    }
+    function selectProfileLink(root, author) {
+      var links = Array.from(root.querySelectorAll('a[href*="/in/"], a[href*="/company/"]'));
+      var normalizedAuthor = normalize(author).toLowerCase();
+      var i;
+      var label;
+      for (i = 0; i < links.length; i += 1) {
+        label = normalize(links[i].textContent || links[i].getAttribute('aria-label')).toLowerCase();
+        if (!links[i].href) continue;
+        if (normalizedAuthor && label.indexOf(normalizedAuthor) >= 0) return links[i];
+      }
+      return links[0] || null;
+    }
+    function parseActorLink(linkText) {
+      var text = normalize(linkText);
+      var match = text.match(/^(.+?)\\s*[•·]\\s*(?:1st|2nd|3rd|degree connection|([123]\\s*度))\\s*(.+?)\\s+(\\d+\\s*(?:s|m|h|d|w|mo|yr|min|秒|分钟|小時|小时|天|周|星期|个月|月|年))\\s*[•·]?$/i);
+      if (!match) return null;
+      return {
+        author: normalize(match[1]),
+        headline: normalize(match[3]),
+        postedAt: normalize(match[4]),
+      };
+    }
+    var path = String(window.location.pathname || '');
+    var loginRequired = path.indexOf('/login') >= 0
+      || path.indexOf('/checkpoint/') >= 0
+      || Boolean(document.querySelector('input[name="session_key"], form.login__form'));
+    var cards = Array.from(document.querySelectorAll('[role="listitem"]'));
+    var posts = [];
+    var i;
+    for (i = 0; i < cards.length; i += 1) {
+      var root = cards[i];
+      var blocks = splitBlocks(root.innerText || '');
+      if (blocks.length < 5 || !isFeedMarker(blocks[0])) continue;
+      var filtered = [];
+      var j;
+      for (j = 1; j < blocks.length; j += 1) {
+        if (!blocks[j]) continue;
+        if (/commented on this|reposted this|liked this|suggested/i.test(blocks[j])) continue;
+        filtered.push(blocks[j]);
+      }
+      var author = '';
+      var headline = '';
+      var postedAt = '';
+      for (j = 0; j < filtered.length; j += 1) {
+        var value = filtered[j];
+        if (!author && looksLikeAuthorCandidate(value)) {
+          author = value;
+          continue;
+        }
+        if (author && !headline && looksLikeAuthorCandidate(value)) {
+          headline = value;
+          continue;
+        }
+        if (!postedAt && isTimestamp(value)) {
+          postedAt = value;
+          continue;
+        }
+      }
+      var actorLink = selectProfileLink(root, author);
+      var actorMeta = parseActorLink(actorLink ? actorLink.textContent : '');
+      if (actorMeta) {
+        if (!author) author = actorMeta.author;
+        if (!headline) headline = actorMeta.headline;
+        if (!postedAt) postedAt = actorMeta.postedAt;
+      }
+      if (!author) continue;
+      var bodyStart = 0;
+      if (postedAt) {
+        bodyStart = filtered.indexOf(postedAt) + 1;
+      } else if (headline) {
+        bodyStart = filtered.indexOf(headline) + 1;
+      } else {
+        bodyStart = 1;
+      }
+      if (bodyStart < 0) bodyStart = 0;
+      var endIndex = filtered.length;
+      for (j = bodyStart; j < filtered.length; j += 1) {
+        if (isEngagement(filtered[j]) || isFooterAction(filtered[j])) {
+          endIndex = j;
+          break;
+        }
+      }
+      var text = stripBody(filtered.slice(bodyStart, endIndex).join('\\n\\n'));
+      if (!text) continue;
+      var permalink = root.querySelector('a[href*="/feed/update/"], a[href*="/posts/"], a[href*="/pulse/"]');
+      var url = permalink && permalink.href ? permalink.href : '';
+      var reactions = 0;
+      var comments = 0;
+      for (j = 0; j < filtered.length; j += 1) {
+        if (!reactions && /(?:reactions?|次回应)/i.test(filtered[j])) reactions = parseMetric(filtered[j]);
+        if (!comments && /(?:comments?|条评论)/i.test(filtered[j])) comments = parseMetric(filtered[j]);
+      }
+      posts.push({
+        id: url || (author + '::' + postedAt + '::' + text.slice(0, 120)),
+        author: author,
+        author_url: actorLink && actorLink.href ? actorLink.href : '',
+        headline: headline,
+        text: text,
+        posted_at: postedAt,
+        reactions: reactions,
+        comments: comments,
+        url: url,
+      });
+    }
+    return { loginRequired: loginRequired, posts: posts };
+  })()`);
+}
+
+async function ensureLinkedinFeedPage(page: IPage): Promise<void> {
+  const targetUrl = 'https://www.linkedin.com/feed/';
+  await adoptLinkedinTab(page, targetUrl, ['/feed/']);
+  const currentUrl = await page.getCurrentUrl?.().catch(() => null) || '';
+  if (!looksLikeLinkedinFeedUrl(currentUrl)) {
+    await page.goto(targetUrl);
+  }
+  await page.wait(4);
+}
+
 cli({
   site: 'linkedin',
   name: 'timeline',
@@ -495,16 +695,17 @@ cli({
   func: async (page, kwargs) => {
     const limit = Math.max(1, Math.min(kwargs.limit ?? 20, 100));
 
-    await page.goto('https://www.linkedin.com/feed/');
-    await page.wait(4);
+    await ensureLinkedinFeedPage(page);
 
     let posts: TimelinePost[] = [];
     let sawLoginWall = false;
 
     for (let i = 0; i < 6 && posts.length < limit; i++) {
       const batch = await extractVisiblePosts(page);
-      if (batch?.loginRequired) sawLoginWall = true;
+      const localizedBatch = await extractLocalizedFeedPosts(page);
+      if (batch?.loginRequired || localizedBatch?.loginRequired) sawLoginWall = true;
       posts = mergeTimelinePosts(posts, Array.isArray(batch?.posts) ? batch.posts : []);
+      posts = mergeTimelinePosts(posts, Array.isArray(localizedBatch?.posts) ? localizedBatch.posts : []);
       if (posts.length >= limit) break;
       await page.autoScroll({ times: 1, delayMs: 1200 });
       await page.wait(1);
@@ -526,6 +727,7 @@ cli({
 });
 
 export const __test__ = {
+  looksLikeLinkedinFeedUrl,
   parseMetric,
   buildPostId,
   mergeTimelinePosts,

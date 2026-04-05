@@ -18,6 +18,7 @@ interface FollowUpBatchReplyOptions {
   unreadOnly: boolean;
   requireCandidateId: boolean;
   requireProfileUrl: boolean;
+  conversationIds: string[];
   limit: number;
 }
 
@@ -30,11 +31,24 @@ function parsePriorities(value: unknown): string[] {
   return unique.length > 0 ? unique : ['high', 'medium'];
 }
 
+function parseConversationIds(value: unknown): string[] {
+  const normalized = String(value ?? '')
+    .split(/[,\r\n]+/)
+    .map(item => item.trim())
+    .filter(Boolean);
+  return [...new Set(normalized)];
+}
+
 function filterFollowUpQueueForBatchReply(
   queue: RecruiterFollowUpQueueItem[],
   options: FollowUpBatchReplyOptions,
 ): RecruiterFollowUpQueueItem[] {
+  const requestedIds = new Set(options.conversationIds.map(item => String(item).trim()).filter(Boolean));
   return queue
+    .filter((item) => {
+      if (requestedIds.size === 0) return true;
+      return requestedIds.has(String(item.conversation_id ?? '').trim());
+    })
     .filter(item => options.priorities.includes(String(item.priority ?? '').toLowerCase()))
     .filter((item) => {
       if (options.unreadOnly) {
@@ -120,6 +134,7 @@ cli({
       help: 'Reply template with placeholders like {{first_name}}, {{priority}}, {{reason}}, and {{last_message}}',
     },
     { name: 'priorities', type: 'string', default: 'high,medium', help: 'Comma separated priority levels to include' },
+    { name: 'conversation-ids', type: 'string', help: 'Comma or newline separated conversation_id values to target exactly within the follow-up queue' },
     { name: 'limit', type: 'int', default: 10, help: 'Maximum queue rows to process after ranking and filtering' },
     { name: 'inbox-limit', type: 'int', default: 75, help: 'Visible inbox threads to sample before ranking' },
     { name: 'unread-only', type: 'bool', default: true, help: 'Only reply to unread or newly updated threads' },
@@ -148,6 +163,7 @@ cli({
     if (!template) throw new ArgumentError('template is required');
 
     const priorities = parsePriorities(kwargs.priorities);
+    const conversationIds = parseConversationIds(kwargs['conversation-ids']);
     const limit = Math.max(1, Math.min(Number(kwargs.limit ?? 10), 200));
     const inboxLimit = Math.max(limit, Math.min(Number(kwargs['inbox-limit'] ?? 75), 250));
     const delayMs = Math.max(0, Number(kwargs['delay-ms'] ?? 1500));
@@ -169,6 +185,7 @@ cli({
       unreadOnly,
       requireCandidateId,
       requireProfileUrl,
+      conversationIds,
       limit,
     });
 
@@ -226,6 +243,7 @@ cli({
 
 export const __test__ = {
   parsePriorities,
+  parseConversationIds,
   filterFollowUpQueueForBatchReply,
   resolveFollowUpBatchReplyTargetUrl,
 };

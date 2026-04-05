@@ -5,13 +5,22 @@ const {
   normalizeWhitespace,
   parseCsvArg,
   toYesNo,
+  looksLikeRecruiterNoteReplySurface,
+  looksLikeRecruiterReplyComposer,
   queriesLookCompatible,
+  namesLookCompatible,
   candidateIdFromProfileUrl,
   decodeCandidateId,
+  normalizeRecruiterInboxReplyResult,
   resolveRecruiterProfileUrl,
+  isLinkedinProfileUrl,
   buildRecruiterProjectUrl,
+  buildRecruiterProjectMembersUrl,
+  extractRecruiterProjectId,
+  extractRecruiterProfileToken,
   buildRecruiterInboxUrl,
   buildRecruiterInboxThreadUrl,
+  buildRecruiterProfileMessagesUrl,
   buildRecruiterSearchUrl,
   formatNetworkDistance,
   firstCurrentWorkExperience,
@@ -27,6 +36,7 @@ const {
   exportRecruiterFollowUpQueue,
   applyVisibleFilters,
   listToMultiline,
+  describeRecruiterProjectChooserBlocker,
 } = await import('./recruiter-utils.js').then((m) => (m as any).__test__);
 
 describe('linkedin recruiter utils', () => {
@@ -45,16 +55,48 @@ describe('linkedin recruiter utils', () => {
     expect(toYesNo('0')).toBe('no');
   });
 
+  it('distinguishes recruiter inbox composers from note reply surfaces', () => {
+    expect(looksLikeRecruiterReplyComposer('compose-textarea__textarea 写新消息')).toBe(true);
+    expect(looksLikeRecruiterReplyComposer('textarea placeholder=回复…')).toBe(true);
+    expect(looksLikeRecruiterNoteReplySurface('create-edit-note__form 输入备注文本')).toBe(true);
+    expect(looksLikeRecruiterNoteReplySurface('note__reply 备注')).toBe(true);
+    expect(looksLikeRecruiterNoteReplySurface('compose-textarea__textarea 写新消息')).toBe(false);
+  });
+
   it('detects compatible recruiter queries without requiring an exact string match', () => {
     expect(queriesLookCompatible('technical recruiter', 'technical recruiter singapore')).toBe(true);
     expect(queriesLookCompatible('technical recruiter', 'senior technical recruiter')).toBe(true);
     expect(queriesLookCompatible('technical recruiter', 'talent acquisition')).toBe(false);
   });
 
+  it('only treats genuinely matching candidate names as compatible', () => {
+    expect(namesLookCompatible('James Harrison', 'Jame Harri on')).toBe(true);
+    expect(namesLookCompatible('Andrea Cheng Zi Ting', 'Andrea Cheng Zi Ting')).toBe(true);
+    expect(namesLookCompatible('Soojin Cheon', 'Amanda Yeo')).toBe(false);
+  });
+
   it('encodes and decodes candidate ids from profile urls', () => {
     const id = candidateIdFromProfileUrl('https://www.linkedin.com/in/jane-doe/?trk=public_profile');
     expect(id.startsWith('url:')).toBe(true);
     expect(decodeCandidateId(id)).toBe('https://www.linkedin.com/in/jane-doe/');
+  });
+
+  it('normalizes inbox reply results by canonicalizing profile urls and backfilling candidate ids', () => {
+    expect(normalizeRecruiterInboxReplyResult({
+      conversation_id: 'conv-1',
+      candidate_id: '',
+      profile_url: 'https://www.linkedin.com/talent/profile/AEMA123?project=42&trk=null',
+      status: 'sent',
+      detail: 'Sent recruiter reply: BEST WISHES！',
+      list_source: 'batch-reply',
+    })).toEqual({
+      conversation_id: 'conv-1',
+      candidate_id: 'url:aHR0cHM6Ly93d3cubGlua2VkaW4uY29tL3RhbGVudC9wcm9maWxlL0FFTUExMjM_cHJvamVjdD00Mg',
+      profile_url: 'https://www.linkedin.com/talent/profile/AEMA123?project=42',
+      status: 'sent',
+      detail: 'Sent recruiter reply: BEST WISHES！',
+      list_source: 'batch-reply',
+    });
   });
 
   it('resolves recruiter profile urls from candidate references', () => {
@@ -66,19 +108,55 @@ describe('linkedin recruiter utils', () => {
     );
   });
 
+  it('recognizes linkedin profile routes and rejects non-profile recruiter pages', () => {
+    expect(isLinkedinProfileUrl('https://www.linkedin.com/in/jane-doe/')).toBe(true);
+    expect(isLinkedinProfileUrl('https://www.linkedin.com/talent/profile/ACoAAA123XYZ')).toBe(true);
+    expect(
+      isLinkedinProfileUrl(
+        'https://www.linkedin.com/talent/profile/AEMAAAJl1xUBwuXZaxqmsdoftRhCU3mnT38FR78/requisition?project=376124946',
+      ),
+    ).toBe(true);
+    expect(isLinkedinProfileUrl('https://www.linkedin.com/talent/hire/376124946/manage/all')).toBe(false);
+    expect(isLinkedinProfileUrl('https://www.linkedin.com/uas/login-cap?session_redirect=foo')).toBe(false);
+  });
+
   it('builds recruiter project urls', () => {
     expect(buildRecruiterProjectUrl('project 123')).toBe(
-      'https://www.linkedin.com/talent/projects/project%20123',
+      'https://www.linkedin.com/talent/hire/project%20123/overview',
+    );
+    expect(buildRecruiterProjectMembersUrl('project 123')).toBe(
+      'https://www.linkedin.com/talent/hire/project%20123/manage/all',
     );
   });
 
+  it('extracts recruiter project and profile tokens from profile urls', () => {
+    const url = 'https://www.linkedin.com/talent/profile/AEMAAAJl1xUBwuXZaxqmsdoftRhCU3mnT38FR78?project=376124946&trk=PROJECT_PIPELINE';
+    expect(extractRecruiterProjectId(url)).toBe('376124946');
+    expect(extractRecruiterProfileToken(url)).toBe('AEMAAAJl1xUBwuXZaxqmsdoftRhCU3mnT38FR78');
+  });
+
   it('builds recruiter inbox urls', () => {
-    expect(buildRecruiterInboxUrl()).toBe('https://www.linkedin.com/talent/messages');
+    expect(buildRecruiterInboxUrl()).toBe('https://www.linkedin.com/talent/inbox/0/main');
   });
 
   it('builds recruiter inbox thread urls', () => {
     expect(buildRecruiterInboxThreadUrl('conv 123')).toBe(
-      'https://www.linkedin.com/talent/messages?conversationId=conv%20123',
+      'https://www.linkedin.com/talent/inbox/0/main/id/conv%20123',
+    );
+  });
+
+  it('builds recruiter profile message urls', () => {
+    expect(buildRecruiterProfileMessagesUrl(
+      undefined,
+      'https://www.linkedin.com/talent/profile/AEMAAAJl1xUBwuXZaxqmsdoftRhCU3mnT38FR78?project=376124946&trk=PROJECT_PIPELINE',
+    )).toBe(
+      'https://www.linkedin.com/talent/profile/AEMAAAJl1xUBwuXZaxqmsdoftRhCU3mnT38FR78/messages?project=376124946&trk=PROJECT_PIPELINE',
+    );
+    expect(buildRecruiterProfileMessagesUrl(
+      'url:aHR0cHM6Ly93d3cubGlua2VkaW4uY29tL3RhbGVudC9wcm9maWxlL0FFTUFBQUpsMXhVQnd1WFpheHFtc2RvZnRSaENVM21uVDM4RlI3OD9wcm9qZWN0PTM3NjEyNDk0NiZ0cms9UFJPSkVDVF9QSVBFTElORQ',
+      undefined,
+    )).toBe(
+      'https://www.linkedin.com/talent/profile/AEMAAAJl1xUBwuXZaxqmsdoftRhCU3mnT38FR78/messages?project=376124946',
     );
   });
 
@@ -420,5 +498,31 @@ describe('linkedin recruiter utils', () => {
 
   it('formats multiline list output', () => {
     expect(listToMultiline([' Java ', '', 'Python'])).toBe('Java\nPython');
+  });
+
+  it('describes an empty more-actions dropdown as a live product blocker', () => {
+    expect(describeRecruiterProjectChooserBlocker({
+      stageButtons: ['保存到备选人才 选择要保存至的备选人才阶段'],
+      visibleButtons: ['发消息给Yiming', 'Yiming Chen的更多操作'],
+      moreActions: {
+        opened: true,
+        ariaHidden: 'false',
+        childCount: 0,
+        text: '',
+        visibility: 'visible',
+        opacity: '1',
+        zIndex: '999',
+      },
+    })).toContain('Recruiter more-actions opened, but LinkedIn did not populate a visible cross-project menu on this profile.');
+  });
+
+  it('falls back to a stage-save-only error when no chooser surface is populated', () => {
+    expect(describeRecruiterProjectChooserBlocker({
+      stageButtons: ['保存到备选人才 选择要保存至的备选人才阶段'],
+      visibleButtons: ['发消息给Yiming', 'Yiming Chen的更多操作'],
+      moreActions: null,
+    })).toBe(
+      'Only stage-save actions were visible on the current Recruiter profile, not a cross-project chooser. Visible save actions: 保存到备选人才 选择要保存至的备选人才阶段',
+    );
   });
 });

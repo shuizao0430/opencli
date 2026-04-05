@@ -7,6 +7,9 @@ import './recruiter-saved-searches.js';
 const { buildProjectUrl } = await import('./recruiter-project-members.js').then(
   (m) => (m as any).__test__,
 );
+const { buildRecruiterSavedSearchesUrl } = await import('./recruiter-utils.js').then(
+  (m) => (m as any).__test__,
+);
 
 describe('linkedin recruiter list adapters', () => {
   it('registers recruiter project list', () => {
@@ -39,7 +42,15 @@ describe('linkedin recruiter list adapters', () => {
 describe('buildProjectUrl', () => {
   it('builds recruiter project routes', () => {
     expect(buildProjectUrl('project 123')).toBe(
-      'https://www.linkedin.com/talent/projects/project%20123',
+      'https://www.linkedin.com/talent/hire/project%20123/manage/all',
+    );
+  });
+});
+
+describe('buildRecruiterSavedSearchesUrl', () => {
+  it('builds the live recruiter saved-searches route', () => {
+    expect(buildRecruiterSavedSearchesUrl()).toBe(
+      'https://www.linkedin.com/talent/search/saved-searches',
     );
   });
 });

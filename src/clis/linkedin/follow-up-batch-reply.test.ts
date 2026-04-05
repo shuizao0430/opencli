@@ -5,6 +5,7 @@ import './recruiter-utils.js';
 
 const {
   parsePriorities,
+  parseConversationIds,
   filterFollowUpQueueForBatchReply,
   resolveFollowUpBatchReplyTargetUrl,
 } = await import('./follow-up-batch-reply.js').then((m) => (m as any).__test__);
@@ -19,6 +20,7 @@ describe('linkedin follow-up-batch-reply adapter', () => {
       expect.arrayContaining([
         'template',
         'priorities',
+        'conversation-ids',
         'limit',
         'inbox-limit',
         'unread-only',
@@ -44,6 +46,7 @@ describe('linkedin follow-up-batch-reply adapter', () => {
 
   it('parses priorities and filters ranked queue rows', () => {
     expect(parsePriorities('high,medium,high')).toEqual(['high', 'medium']);
+    expect(parseConversationIds('conv-1,\nconv-2,conv-1')).toEqual(['conv-1', 'conv-2']);
 
     const filtered = filterFollowUpQueueForBatchReply([
       {
@@ -83,6 +86,7 @@ describe('linkedin follow-up-batch-reply adapter', () => {
       unreadOnly: true,
       requireCandidateId: false,
       requireProfileUrl: false,
+      conversationIds: ['conv-1'],
       limit: 10,
     });
 
@@ -113,7 +117,7 @@ describe('linkedin follow-up-batch-reply adapter', () => {
       item,
     )).toBe('Hi Jane, following up because thread marked unread; active today.');
     expect(resolveFollowUpBatchReplyTargetUrl(item)).toBe(
-      'https://www.linkedin.com/talent/messages?conversationId=conv-1',
+      'https://www.linkedin.com/talent/inbox/0/main/id/conv-1',
     );
   });
 });

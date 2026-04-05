@@ -1,6 +1,7 @@
 import { AuthRequiredError, CommandExecutionError, EmptyResultError } from '../../errors.js';
 import { generateInterceptorJs } from '../../interceptor.js';
-import type { IPage } from '../../types.js';
+import { sendCommand } from '../../browser/daemon-client.js';
+import type { BrowserSessionInfo, IPage } from '../../types.js';
 
 export interface RecruiterPeopleSearchInput {
   query: string;
@@ -180,11 +181,27 @@ export interface RecruiterNoteResult {
   list_source: string;
 }
 
+interface RecruiterMoreActionsDropdownState {
+  opened: boolean;
+  ariaHidden: string;
+  childCount: number;
+  text: string;
+  visibility: string;
+  opacity: string;
+  zIndex: string;
+}
+
 interface SurfaceDetectionResult {
   currentUrl: string;
   loginRequired: boolean;
   recruiterDetected: boolean;
   publicProfileDetected: boolean;
+}
+
+interface BrowserTabMatch {
+  tabId?: number;
+  url?: string;
+  active?: boolean;
 }
 
 export interface RecruiterSearchStateProbe {
@@ -200,6 +217,34 @@ export interface RecruiterSearchStateProbe {
 
 export function normalizeWhitespace(value: unknown): string {
   return String(value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function describeRecruiterProjectChooserBlocker(options: {
+  stageButtons: string[];
+  visibleButtons: string[];
+  moreActions?: RecruiterMoreActionsDropdownState | null;
+}): string {
+  const stageButtons = options.stageButtons.map(item => normalizeWhitespace(item)).filter(Boolean);
+  const visibleButtons = options.visibleButtons.map(item => normalizeWhitespace(item)).filter(Boolean);
+  const moreActions = options.moreActions;
+  const renderedText = normalizeWhitespace(moreActions?.text);
+  if (moreActions?.opened && (moreActions.childCount ?? 0) === 0 && !renderedText) {
+    const state = [
+      `childCount=${moreActions.childCount ?? 0}`,
+      `ariaHidden=${normalizeWhitespace(moreActions.ariaHidden) || '(unset)'}`,
+      `visibility=${normalizeWhitespace(moreActions.visibility) || '(unset)'}`,
+      `opacity=${normalizeWhitespace(moreActions.opacity) || '(unset)'}`,
+      `zIndex=${normalizeWhitespace(moreActions.zIndex) || '(unset)'}`,
+    ].join(', ');
+    const stageSuffix = stageButtons.length > 0
+      ? ` Only stage-save actions were visible elsewhere: ${stageButtons.join(' | ')}.`
+      : '';
+    return `Recruiter more-actions opened, but LinkedIn did not populate a visible cross-project menu on this profile. Dropdown state: ${state}.${stageSuffix}`;
+  }
+  if (stageButtons.length > 0) {
+    return `Only stage-save actions were visible on the current Recruiter profile, not a cross-project chooser. Visible save actions: ${stageButtons.join(' | ')}`;
+  }
+  return `No visible Recruiter cross-project chooser was found on the current profile page. Visible buttons: ${visibleButtons.join(' | ') || '(none)'}`;
 }
 
 export function parseCsvArg(value: unknown): string[] {
@@ -219,6 +264,16 @@ export function toYesNo(value: unknown): string {
   return normalized;
 }
 
+function looksLikeRecruiterNoteReplySurface(descriptor: unknown): boolean {
+  const normalized = normalizeWhitespace(descriptor).toLowerCase();
+  return /note|notes|备注|输入备注文本/.test(normalized);
+}
+
+function looksLikeRecruiterReplyComposer(descriptor: unknown): boolean {
+  const normalized = normalizeWhitespace(descriptor).toLowerCase();
+  return /reply|message|inmail|写新消息|回复|消息|发送消息/.test(normalized);
+}
+
 function tokenizeRecruiterSearchQuery(value: unknown): string[] {
   return normalizeWhitespace(value)
     .toLowerCase()
@@ -232,6 +287,69 @@ export function queriesLookCompatible(expected: unknown, candidate: unknown): bo
   if (expectedTokens.length === 0 || candidateTokens.length === 0) return false;
   const candidateSet = new Set(candidateTokens);
   return expectedTokens.every(token => candidateSet.has(token));
+}
+
+export function namesLookCompatible(expected: unknown, candidate: unknown): boolean {
+  const tokenize = (value: unknown) => normalizeWhitespace(value)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+  const compact = (tokens: string[]) => tokens.join('');
+  const editDistance = (left: string, right: string) => {
+    if (left === right) return 0;
+    if (!left) return right.length;
+    if (!right) return left.length;
+    const prev = Array.from({ length: right.length + 1 }, (_, index) => index);
+    for (let i = 1; i <= left.length; i += 1) {
+      let diagonal = prev[0];
+      prev[0] = i;
+      for (let j = 1; j <= right.length; j += 1) {
+        const temp = prev[j];
+        prev[j] = Math.min(
+          prev[j] + 1,
+          prev[j - 1] + 1,
+          diagonal + (left[i - 1] === right[j - 1] ? 0 : 1),
+        );
+        diagonal = temp;
+      }
+    }
+    return prev[right.length];
+  };
+  const similarToken = (left: string, right: string) => {
+    if (!left || !right) return false;
+    if (left === right) return true;
+    if (left.startsWith(right) || right.startsWith(left)) return true;
+    if (left.length >= 4 && right.length >= 4 && left.slice(0, 4) === right.slice(0, 4)) return true;
+    const distance = editDistance(left, right);
+    return Math.max(left.length, right.length) >= 5
+      && distance <= Math.max(1, Math.floor(Math.max(left.length, right.length) / 4))
+      && left[0] === right[0];
+  };
+
+  const expectedTokens = tokenize(expected);
+  const candidateTokens = tokenize(candidate);
+  if (expectedTokens.length === 0 || candidateTokens.length === 0) return false;
+
+  const expectedCompact = compact(expectedTokens);
+  const candidateCompact = compact(candidateTokens);
+  if (expectedCompact === candidateCompact) return true;
+  if (expectedCompact.length >= 6 && candidateCompact.includes(expectedCompact)) return true;
+  if (candidateCompact.length >= 6 && expectedCompact.includes(candidateCompact)) return true;
+
+  if (expectedTokens.length === 1 || candidateTokens.length === 1) {
+    return similarToken(expectedCompact, candidateCompact);
+  }
+
+  if (
+    similarToken(expectedTokens[0], candidateTokens[0])
+    && similarToken(compact(expectedTokens.slice(1)), compact(candidateTokens.slice(1)))
+  ) {
+    return true;
+  }
+
+  return similarToken(expectedTokens[0], candidateTokens[0])
+    && similarToken(expectedTokens[expectedTokens.length - 1], candidateTokens[candidateTokens.length - 1]);
 }
 
 export function canonicalizeLinkedinUrl(url: string): string {
@@ -287,6 +405,18 @@ export function candidateIdFromArtifacts(profileUrl: string, fallbackUrn?: strin
   return normalizeWhitespace(fallbackUrn);
 }
 
+function normalizeRecruiterInboxReplyResult(
+  result: RecruiterInboxReplyResult,
+): RecruiterInboxReplyResult {
+  const profileUrl = decodeLinkedinRedirect(result.profile_url);
+  const candidateId = normalizeWhitespace(result.candidate_id) || candidateIdFromArtifacts(profileUrl, '');
+  return {
+    ...result,
+    candidate_id: candidateId,
+    profile_url: profileUrl,
+  };
+}
+
 export function resolveRecruiterProfileUrl(
   candidateId: string | undefined,
   profileUrl: string | undefined,
@@ -308,19 +438,99 @@ export function resolveRecruiterProfileUrl(
   return `https://www.linkedin.com/talent/profile/${encodeURIComponent(raw)}`;
 }
 
+export function isLinkedinProfileUrl(url: string | undefined): boolean {
+  const normalized = normalizeWhitespace(url);
+  if (!normalized) return false;
+  try {
+    const parsed = new URL(normalized, 'https://www.linkedin.com');
+    return /^\/in\/[^/]+\/?$/i.test(parsed.pathname) || /\/talent\/profile\//i.test(parsed.pathname);
+  } catch {
+    return /^https?:\/\/[^/]*linkedin\.com\/(?:in\/[^/]+\/?|talent\/profile\/)/i.test(normalized);
+  }
+}
+
 export function buildRecruiterProjectUrl(projectId: string): string {
-  return `https://www.linkedin.com/talent/projects/${encodeURIComponent(normalizeWhitespace(projectId))}`;
+  return `https://www.linkedin.com/talent/hire/${encodeURIComponent(normalizeWhitespace(projectId))}/overview`;
+}
+
+export function buildRecruiterProjectMembersUrl(projectId: string): string {
+  return `https://www.linkedin.com/talent/hire/${encodeURIComponent(normalizeWhitespace(projectId))}/manage/all`;
 }
 
 export function buildRecruiterInboxUrl(): string {
-  return 'https://www.linkedin.com/talent/messages';
+  return 'https://www.linkedin.com/talent/inbox/0/main';
+}
+
+export function buildRecruiterSavedSearchesUrl(): string {
+  return 'https://www.linkedin.com/talent/search/saved-searches';
 }
 
 export function buildRecruiterInboxThreadUrl(conversationId: string): string {
   const normalized = normalizeWhitespace(conversationId);
   const base = buildRecruiterInboxUrl();
   if (!normalized) return base;
-  return `${base}?conversationId=${encodeURIComponent(normalized)}`;
+  return `${base}/id/${encodeURIComponent(normalized)}`;
+}
+
+export function buildRecruiterProfileMessagesUrl(
+  candidateId: string | undefined,
+  profileUrl: string | undefined,
+): string {
+  const resolvedProfileUrl = resolveRecruiterProfileUrl(candidateId, profileUrl);
+  const profileToken = extractRecruiterProfileToken(resolvedProfileUrl);
+  if (!profileToken) return '';
+
+  try {
+    const parsed = new URL(resolvedProfileUrl, 'https://www.linkedin.com');
+    parsed.pathname = `/talent/profile/${encodeURIComponent(profileToken)}/messages`;
+    parsed.searchParams.delete('rightRail');
+    return parsed.toString();
+  } catch {
+    return `https://www.linkedin.com/talent/profile/${encodeURIComponent(profileToken)}/messages`;
+  }
+}
+
+export function extractRecruiterProjectId(profileUrl: string | undefined): string {
+  const normalized = normalizeWhitespace(profileUrl);
+  if (!normalized) return '';
+  try {
+    const parsed = new URL(normalized, 'https://www.linkedin.com');
+    return normalizeWhitespace(parsed.searchParams.get('project'));
+  } catch {
+    return '';
+  }
+}
+
+export function extractRecruiterProfileToken(profileUrl: string | undefined): string {
+  const normalized = normalizeWhitespace(profileUrl);
+  if (!normalized) return '';
+  try {
+    const parsed = new URL(normalized, 'https://www.linkedin.com');
+    return normalizeWhitespace(parsed.pathname.match(/\/talent\/profile\/([^/?#]+)/i)?.[1]);
+  } catch {
+    return normalizeWhitespace(normalized.match(/\/talent\/profile\/([^/?#]+)/i)?.[1]);
+  }
+}
+
+function chooseMatchingLinkedinTab(
+  tabs: BrowserTabMatch[],
+  targetUrl: string,
+  fallbackPatterns: string[],
+): BrowserTabMatch | undefined {
+  const normalizedTargetUrl = normalizeWhitespace(targetUrl).toLowerCase();
+  const normalizedPatterns = fallbackPatterns.map(pattern => normalizeWhitespace(pattern).toLowerCase()).filter(Boolean);
+  const matchingTabs = tabs.filter((tab) => {
+    const url = String(tab.url || '').toLowerCase();
+    return Boolean(
+      (normalizedTargetUrl && url === normalizedTargetUrl)
+      || normalizedPatterns.some(pattern => url.includes(pattern)),
+    );
+  });
+
+  return matchingTabs.find((tab) => String(tab.url || '').toLowerCase() === normalizedTargetUrl && tab.active)
+    || matchingTabs.find((tab) => String(tab.url || '').toLowerCase() === normalizedTargetUrl)
+    || matchingTabs.find((tab) => tab.active)
+    || matchingTabs.find((tab) => tab.url);
 }
 
 export function buildRecruiterSearchUrl(input: RecruiterPeopleSearchInput): string {
@@ -1038,12 +1248,26 @@ export function buildPageEval<TArgs extends unknown[]>(
 function detectLinkedinSurfaceInPage(): SurfaceDetectionResult {
   const path = String(window.location.pathname || '');
   const currentUrl = window.location.href;
+  const bodyText = String(document.body?.innerText || '').replace(/\s+/g, ' ').toLowerCase();
   const loginRequired = path.includes('/login')
     || path.includes('/checkpoint/')
     || Boolean(document.querySelector('input[name="session_key"], form.login__form'));
   const recruiterDetected = path.includes('/talent/')
     || path.includes('/recruiter/')
-    || Boolean(document.querySelector('[href*="/talent/search"], [data-test-recruiter-layout], [data-live-test-recruiter]'));
+    || Boolean(document.querySelector([
+      '[href*="/talent/search"]',
+      '[href*="/talent/projects"]',
+      '[href*="/talent/messages"]',
+      '[href*="/talent/inbox"]',
+      '[href*="/talent/saved-searches"]',
+      '[href*="/talent/search/saved-searches"]',
+      '[data-test-recruiter-layout]',
+      '[data-live-test-recruiter]',
+      '[data-test-search-results]',
+      '[data-test-conversation-list-item]',
+    ].join(', ')))
+    || (/linkedin recruiter|recruiter lite|talent search|saved searches|inmail|candidate|项目|候选人|消息/.test(bodyText)
+      && /talent|recruiter|项目|候选人|消息/.test(currentUrl.toLowerCase() + ' ' + bodyText));
   const publicProfileDetected = /^\/in\/[^/]+\/?$/.test(path)
     || Boolean(document.querySelector('main h1, .pv-top-card, [data-view-name="profile-component-entity"]'));
 
@@ -1178,6 +1402,86 @@ function seedRecruiterSearchInPage(input: RecruiterPeopleSearchInput): { applied
   }
 
   return { applied: appliedKeyword || appliedLocation, attempted };
+}
+
+function buildRecruiterInteractiveSearchText(input: RecruiterPeopleSearchInput): string {
+  return [
+    input.query,
+    input.location,
+    input.currentTitle,
+    input.pastCompany,
+    input.industry,
+    input.seniority,
+  ]
+    .map(part => normalizeWhitespace(part))
+    .filter(Boolean)
+    .join(' ');
+}
+
+export async function trySeedRecruiterSearchInteractively(
+  page: IPage,
+  input: RecruiterPeopleSearchInput,
+): Promise<boolean> {
+  const typedValue = buildRecruiterInteractiveSearchText(input);
+  if (!typedValue || !page.nativeType || !page.nativeKeyPress) return false;
+
+  const focused = await page.evaluate(`(() => {
+    const candidates = [...document.querySelectorAll('input')]
+      .filter((node) => {
+        const rect = node.getBoundingClientRect?.();
+        if (!rect) return false;
+        const aria = String(node.getAttribute('aria-label') || '');
+        const placeholder = String(node.getAttribute('placeholder') || '');
+        const cls = String(node.className || '');
+        return rect.top < 120
+          && rect.width > 120
+          && (
+            aria.includes('Search')
+            || aria.includes('搜索')
+            || placeholder.includes('Search')
+            || placeholder.includes('搜索')
+            || placeholder.includes('输入任意内容')
+            || cls.includes('ts-common-typeahead__input')
+          );
+      });
+    const target = candidates[0];
+    if (!target) return false;
+    target.focus();
+    target.value = '';
+    target.dispatchEvent(new Event('input', { bubbles: true }));
+    target.dispatchEvent(new Event('change', { bubbles: true }));
+    return document.activeElement === target;
+  })()`);
+  if (!focused) return false;
+
+  await page.nativeType(typedValue);
+  await page.wait({ time: 1 });
+  const clickedSuggestion = await page.evaluate(`(() => {
+    const normalize = (value) => String(value ?? '').replace(/\\s+/g, ' ').trim().toLowerCase();
+    const expected = normalize(${JSON.stringify(typedValue)});
+    const items = [...document.querySelectorAll('li.artdeco-typeahead__result, [role="link"].artdeco-typeahead__result')];
+    const target = items.find((item) => {
+      const text = normalize(item.textContent || '');
+      if (!text) return false;
+      const mentionsKeywordSearch = text.includes('keyword search') || text.includes('关键词搜索');
+      if (mentionsKeywordSearch && (!expected || text.includes(expected))) return true;
+      return false;
+    }) || items[items.length - 1];
+    if (!target) return false;
+    target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    target.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    return true;
+  })()`);
+  if (clickedSuggestion) {
+    await page.wait({ time: 4 });
+    return true;
+  }
+  await page.nativeKeyPress('ArrowDown');
+  await page.nativeKeyPress('ArrowDown');
+  await page.nativeKeyPress('Enter');
+  await page.wait({ time: 4 });
+  return true;
 }
 
 function extractRecruiterPeopleCardsInPage(listSource: string): RecruiterCandidateSummary[] {
@@ -1678,57 +1982,156 @@ function extractRecruiterProfileInPage(candidateIdHint: string, listSource: stri
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
     .replace(/=+$/g, '');
+  const currentUrl = window.location.href;
+  const isProfileUrl = (value: string) => /^https?:\/\/[^/]*linkedin\.com\/(?:in\/[^/]+\/?|talent\/profile\/)/i.test(value);
+  const looksLikeNoise = (value: string) => /^(?:skip to main content|跳到主要内容|共\s*\d+\s*个通知|notifications?)$/i.test(normalize(value));
 
-  const canonicalLink = (() => {
-    const direct = document.querySelector<HTMLAnchorElement>('a[href*="/in/"], a[href*="/talent/profile/"]');
-    return direct?.href || window.location.href;
-  })();
+  if (!isProfileUrl(currentUrl)) return null;
 
-  const readSectionLines = (keywords: string[]) => {
-    const sections = Array.from(document.querySelectorAll('section, div'));
-    const match = sections.find((section) => {
-      const heading = normalize(section.querySelector('h1, h2, h3, h4, header')?.textContent || '');
-      return keywords.some(keyword => heading.toLowerCase() === keyword.toLowerCase());
-    });
-    if (!match) return [];
-    return uniq(String((match as HTMLElement).innerText || '').split('\n').slice(1));
+  const canonicalLink = currentUrl;
+  const normalizeHeading = (value: string) => normalize(value)
+    .replace(/\s*\(\d+\)\s*$/g, '')
+    .replace(/\s*\[\d+\]\s*$/g, '')
+    .toLowerCase();
+  const headingAliases = new Map<string, string>([
+    ['about', 'about'],
+    ['summary', 'about'],
+    ['摘要', 'about'],
+    ['experience', 'experience'],
+    ['work experience', 'experience'],
+    ['工作经历', 'experience'],
+    ['education', 'education'],
+    ['教育经历', 'education'],
+    ['skills', 'skills'],
+    ['技能', 'skills'],
+    ['languages', 'languages'],
+    ['language proficiency', 'languages'],
+    ['语言', 'languages'],
+    ['location', 'location'],
+    ['所在地点', 'location'],
+    ['personal information', 'personal'],
+    ['个人信息', 'personal'],
+    ['recent activity', 'activity'],
+    ['近期动态', 'activity'],
+    ['最近动态', 'activity'],
+  ]);
+  const isActionLine = (value: string) => /^(?:添加邮箱|添加电话号码|公开档案|更改阶段|归档|发消息给|分享.+获取评价|message|inmail|save to project|add tag|add note)/i.test(normalize(value));
+  const isMetaLine = (value: string) => /(?:^|\s)(?:1st|2nd|3rd)(?:\s|$)|\d+\s*度人脉|\d+\s*度|mutual connection|共同联系人|recently active|近期活跃|项目\s*\(\d+\)|messages?\s*\(\d+\)|inmail/i.test(normalize(value));
+  const readSections = () => {
+    const sections = new Map<string, string[]>();
+    const roots = Array.from(document.querySelectorAll('section, article'));
+    for (const root of roots) {
+      const rootLines = uniq(String((root as HTMLElement).innerText || '').split('\n'));
+      if (rootLines.length === 0) continue;
+      const explicitHeading = normalize(root.querySelector('h1, h2, h3, h4, header, [role="heading"]')?.textContent || '');
+      const headingLine = explicitHeading || rootLines.find(line => headingAliases.has(normalizeHeading(line))) || '';
+      const sectionKey = headingAliases.get(normalizeHeading(headingLine));
+      if (!sectionKey) continue;
+      const lines = uniq(rootLines.filter(line => normalizeHeading(line) !== normalizeHeading(headingLine)));
+      if (lines.length > 0) sections.set(sectionKey, lines);
+    }
+    return sections;
   };
-
   const textLines = uniq(String((document.body as HTMLElement).innerText || '').split('\n'));
+  const sections = readSections();
+  const readBodySection = (aliases: string[]) => {
+    const normalizedAliases = aliases.map(alias => normalizeHeading(alias));
+    const startIndex = textLines.findIndex(line => normalizedAliases.includes(normalizeHeading(line)));
+    if (startIndex < 0) return [];
+    const lines: string[] = [];
+    for (let index = startIndex + 1; index < textLines.length; index += 1) {
+      const line = textLines[index];
+      if (headingAliases.has(normalizeHeading(line))) break;
+      lines.push(line);
+    }
+    return uniq(lines);
+  };
+  const documentTitle = normalize(document.title).replace(/\s*\|\s*LinkedIn.*$/i, '');
+  const fallbackName = textLines.find((line) => {
+    const normalized = normalize(line);
+    if (!normalized) return false;
+    if (headingAliases.has(normalizeHeading(normalized))) return false;
+    if (looksLikeNoise(normalized) || isActionLine(normalized) || isMetaLine(normalized)) return false;
+    if (normalized.length > 80) return false;
+    return /[\p{L}]/u.test(normalized);
+  }) || '';
   const name = normalize(
-    document.querySelector('main h1, h1[data-anonymize="person-name"], [data-test-person-name]')?.textContent
-    || textLines[0]
+    documentTitle
+    || document.querySelector('main h1, h1[data-anonymize="person-name"], [data-test-person-name], h1')?.textContent
+    || fallbackName
     || ''
   );
-  if (!name) return null;
+  if (!name || looksLikeNoise(name)) return null;
 
-  const headline = normalize(
+  const nameIndex = textLines.findIndex(line => normalize(line) === name);
+  const introWindow = nameIndex >= 0 ? textLines.slice(nameIndex + 1, nameIndex + 12) : textLines;
+  const introLines = introWindow.filter((line) => {
+    const normalized = normalize(line);
+    if (!normalized || normalized === name) return false;
+    if (headingAliases.has(normalizeHeading(normalized))) return false;
+    if (isActionLine(normalized)) return false;
+    if (/^(?:search|档案|jobadder|更多)$/i.test(normalized)) return false;
+    return true;
+  });
+  const headlineCandidate = normalize(
     document.querySelector('[data-anonymize="headline"], [data-test-headline], .text-body-medium')?.textContent
-    || textLines.find(line => line !== name)
+    || introLines.find(line => !isMetaLine(line))
     || ''
   );
+  const headline = /^(?:搜索|search)$/i.test(headlineCandidate)
+    ? normalize(introLines.find(line => !isMetaLine(line) && !/^(?:搜索|search)$/i.test(normalize(line))) || '')
+    : headlineCandidate;
+  const headlineLine = introLines.find(line => normalize(line) === headline) || '';
+  const detailLine = introLines.find((line) => {
+    const normalized = normalize(line);
+    return normalized && normalized !== headlineLine && !isMetaLine(normalized);
+  }) || '';
+  const detailSegments = detailLine.split('·').map(segment => normalize(segment)).filter(Boolean);
   const location = normalize(
     document.querySelector('[data-anonymize="location"], [data-test-location]')?.textContent
-    || textLines.find(line => /(remote|united states|canada|europe|uk|singapore|germany|france|india|australia)/i.test(line))
+    || (sections.get('location') || [])[0]
+    || detailSegments.find(segment => /(湾区|地区|市|省|州|区|县|国|美国|中国|新加坡|香港|东京|伦敦|berlin|singapore|tokyo|london|bay area|remote)/i.test(segment))
+    || introLines.find(line => /(remote|united states|canada|europe|uk|singapore|germany|france|india|australia|china|beijing|shanghai|shenzhen|hong kong|tokyo)/i.test(line))
     || ''
   );
-  const about = normalize(readSectionLines(['about', 'summary']).join(' '));
-  const workHistoryLines = readSectionLines(['experience', 'work experience']);
-  const educationLines = readSectionLines(['education']);
-  const skillLines = readSectionLines(['skills']);
-  const languageLines = readSectionLines(['languages', 'language proficiency']);
+  const aboutLines = sections.get('about') || readBodySection(['about', 'summary', '摘要']);
+  const workHistoryLines = sections.get('experience') || readBodySection(['experience', 'work experience', '工作经历']);
+  const educationLines = sections.get('education') || readBodySection(['education', '教育经历']);
+  const skillLines = sections.get('skills') || readBodySection(['skills', '技能']);
+  const languageLines = sections.get('languages') || readBodySection(['languages', 'language proficiency', '语言']);
+  const activityLines = sections.get('activity') || readBodySection(['recent activity', '近期动态', '最近动态']);
+  const personalLines = sections.get('personal') || readBodySection(['personal information', '个人信息']);
+  const about = normalize(aboutLines.join(' '));
 
-  const topSignals = textLines.filter(line => /open to work|mutual connection|recently active|email available|message candidate|inmail/i.test(line));
-  const connectionDegree = textLines.find(line => /(?:^|\s)(1st|2nd|3rd)(?:\s|$)/i.test(line)) || '';
-  const mutualConnections = textLines.find(line => /mutual connection/i.test(line)) || '';
-  const recentActivity = textLines.find(line => /recently active|active today|active this week/i.test(line)) || '';
-  const contactVisibility = uniq(textLines.filter(line => /message|inmail|email available|open profile|connect/i.test(line))).join('; ');
-  const openToWork = /open to work/i.test(`${headline} ${topSignals.join(' ')}`) ? 'yes' : 'no';
+  const topSignals = textLines.filter(line => /open to work|进入就业市场|mutual connection|共同联系人|recently active|近期活跃|email available|添加邮箱|message candidate|发消息给|inmail|公开档案/i.test(line));
+  const connectionDegree = textLines.find(line => /(?:^|\s)(1st|2nd|3rd)(?:\s|$)|\d+\s*度人脉|\d+\s*度/i.test(line)) || '';
+  const mutualConnections = textLines.find(line => /mutual connection|共同联系人/i.test(line)) || '';
+  const recentActivity = activityLines[0] || textLines.find(line => /recently active|active today|active this week|近期活跃/i.test(line)) || '';
+  const contactVisibility = uniq([
+    ...textLines.flatMap((line) => {
+      const normalized = normalize(line);
+      if (!/(添加邮箱|添加电话号码|公开档案|message|发消息给|inmail|email available|open profile|connect)/i.test(normalized)) return [];
+      const matches = normalized.match(/添加邮箱|添加电话号码|公开档案|发消息给[^，,;；]*|message(?: candidate)?|inmail|email available|open profile|connect/ig);
+      return matches || [normalized];
+    }),
+    ...personalLines.filter(line => /(邮箱|email|phone|电话号码|公开档案|profile)/i.test(line)),
+  ]).join('; ');
+  const openToWork = /open to work|进入就业市场/i.test(`${headline} ${topSignals.join(' ')}`) ? 'yes' : 'no';
 
-  const firstExperience = workHistoryLines[0] || headline;
-  const atMatch = normalize(firstExperience).match(/^(.+?)\s+at\s+(.+)$/i);
-  const currentTitle = atMatch ? normalize(atMatch[1]) : normalize(firstExperience.split(' · ')[0] || headline);
-  const currentCompany = atMatch ? normalize(atMatch[2]) : normalize(firstExperience.split(' · ').slice(1).join(' · '));
+  const parsedExperienceLabels = new Set(['职位名称', '公司名称', '招聘日期', '工作地点', '职位简介', '职位招聘状况', '展开']);
+  const parsedTitleIndex = workHistoryLines.findIndex(line => normalize(line) === '职位名称');
+  const parsedCompanyIndex = workHistoryLines.findIndex(line => normalize(line) === '公司名称');
+  const parsedCurrentTitle = parsedTitleIndex >= 0
+    ? normalize(workHistoryLines.slice(parsedTitleIndex + 1).find(line => !parsedExperienceLabels.has(normalize(line))) || '')
+    : '';
+  const parsedCurrentCompanyRaw = parsedCompanyIndex >= 0
+    ? normalize(workHistoryLines.slice(parsedCompanyIndex + 1).find(line => !parsedExperienceLabels.has(normalize(line))) || '')
+    : '';
+  const parsedCurrentCompany = normalize(parsedCurrentCompanyRaw.split('·')[0] || '');
+  const parsedFirstExperience = parsedCurrentTitle || workHistoryLines[0] || headline;
+  const parsedAtMatch = normalize(parsedFirstExperience).match(/^(.+?)\s+at\s+(.+)$/i);
+  const currentTitleResolved = parsedCurrentTitle || (parsedAtMatch ? normalize(parsedAtMatch[1]) : normalize(parsedFirstExperience.split(' 路 ')[0] || headline));
+  const currentCompanyResolved = parsedCurrentCompany || (parsedAtMatch ? normalize(parsedAtMatch[2]) : normalize(parsedFirstExperience.split(' 路 ').slice(1).join(' 路 ')));
 
   const profileUrl = canonicalLink;
   const candidateId = candidateIdHint || `url:${base64UrlEncode(profileUrl)}`;
@@ -1740,8 +2143,8 @@ function extractRecruiterProfileInPage(candidateIdHint: string, listSource: stri
     headline,
     location,
     about,
-    current_company: currentCompany,
-    current_title: currentTitle,
+    current_company: currentCompanyResolved,
+    current_title: currentTitleResolved,
     connection_degree: normalize(connectionDegree),
     open_to_work: openToWork,
     mutual_connections: normalize(mutualConnections),
@@ -1755,33 +2158,92 @@ function extractRecruiterProfileInPage(candidateIdHint: string, listSource: stri
   };
 }
 
+function openRecruiterProfileFromCurrentPageInPage(
+  candidateIdHint: string,
+  profileUrlHint: string,
+): { opened: boolean; href: string } {
+  const normalize = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
+  const decodeCandidate = (value: string) => {
+    const raw = normalize(value);
+    if (!raw.startsWith('url:')) return raw;
+    const base64 = raw.slice(4).replace(/-/g, '+').replace(/_/g, '/');
+    const padding = (4 - (base64.length % 4)) % 4;
+    try {
+      return decodeURIComponent(escape(atob(base64 + '='.repeat(padding))));
+    } catch {
+      return '';
+    }
+  };
+  const explicitUrl = normalize(profileUrlHint);
+  const decodedCandidateUrl = decodeCandidate(candidateIdHint);
+  const candidateUrl = explicitUrl || decodedCandidateUrl;
+  const candidateToken = normalize(candidateUrl.match(/\/talent\/profile\/([^/?#]+)/i)?.[1]);
+  const anchors = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]'));
+  const normalizedCandidateUrl = candidateUrl.toLowerCase();
+
+  const match = anchors.find((anchor) => {
+    const href = normalize(anchor.href);
+    if (!href) return false;
+    const lowerHref = href.toLowerCase();
+    if (normalizedCandidateUrl && lowerHref.includes(normalizedCandidateUrl)) return true;
+    if (candidateToken && lowerHref.includes(`/talent/profile/${candidateToken.toLowerCase()}`)) return true;
+    return false;
+  });
+
+  if (!match) return { opened: false, href: '' };
+  window.location.assign(match.href);
+  return { opened: true, href: match.href };
+}
+
 function extractRecruiterProjectsInPage(): RecruiterProjectSummary[] {
   const normalize = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
   const uniq = (values: string[]) => [...new Set(values.map(value => normalize(value)).filter(Boolean))];
+  const looksLikeUiNoise = (value: string) => /^(项目|前进到第\s*\d+\s*页|\d+\s*第\s*\d+\s*页|next|previous|上一页|下一页|展开项目菜单|open project menu)$/i.test(value);
   const projects: RecruiterProjectSummary[] = [];
-  const roots = new Set<Element>();
+  const roots = new Map<string, Element>();
 
-  for (const link of Array.from(document.querySelectorAll('a[href*="/talent/project"], a[href*="/talent/projects"]'))) {
-    const root = link.closest('li, article, section, [data-project-id], .artdeco-list__item') || link.parentElement;
-    if (root) roots.add(root);
+  for (const root of Array.from(document.querySelectorAll('li.hp-project-list-item, .hp-project-list-item, li, article, section'))) {
+    const text = normalize((root as HTMLElement).innerText || '');
+    if (!text || !/(项目所有者|创建时间|创建日期|位候选人|人才推荐|Company|Location)/i.test(text)) continue;
+    const links = Array.from(root.querySelectorAll<HTMLAnchorElement>('a[href]'));
+    const primaryLink = links.find(link => /\/talent\/hire\/\d+\/overview/i.test(link.href))
+      || links.find(link => /\/talent\/hire\/\d+\//i.test(link.href))
+      || null;
+    const projectId = root.getAttribute('data-project-id')
+      || primaryLink?.href.match(/\/talent\/hire\/(\d+)(?:\/|$)/i)?.[1]
+      || '';
+    if (projectId) roots.set(projectId, root);
   }
 
-  for (const root of roots) {
-    const link = root.querySelector<HTMLAnchorElement>('a[href*="/talent/project"], a[href*="/talent/projects"]');
+  for (const [projectId, root] of roots) {
+    const links = Array.from(root.querySelectorAll<HTMLAnchorElement>('a[href]'));
+    const link = links.find(node => /\/talent\/hire\/\d+\/overview/i.test(node.href))
+      || links.find(node => /\/talent\/hire\/\d+\//i.test(node.href))
+      || links.find(node => normalize(node.textContent || '') && !/人才推荐|discover|review/i.test(normalize(node.textContent || '')))
+      || null;
     const href = link?.href || '';
-    const projectId = root.getAttribute('data-project-id')
-      || href.match(/projects?\/([^/?#]+)/i)?.[1]
-      || '';
     const lines = uniq(String((root as HTMLElement).innerText || '').split('\n'));
-    if (!projectId && lines.length === 0) continue;
+    if (lines.length === 0) continue;
+
+    const nameCandidates = [
+      normalize(link?.textContent || ''),
+      ...lines,
+    ].filter(Boolean);
+    const name = nameCandidates.find(candidate => !looksLikeUiNoise(candidate)) || '';
+    if (!name || looksLikeUiNoise(name)) continue;
+
+    const description = lines.find(line => !looksLikeUiNoise(line) && line !== name) || '';
+    const status = lines.find(line => /open|active|closed|archived|draft|进行中|已归档|关闭/i.test(line)) || '';
+    const candidateCount = lines.find(line => /\d+/.test(line) && /candidate|profile|lead|候选人|人才|profiles?/i.test(line)) || '';
+    const updatedAt = lines.find(line => /查看日期|updated|ago|today|yesterday|刚刚|昨天|今天|更新/i.test(line)) || '';
 
     projects.push({
       project_id: projectId,
-      name: normalize(link?.textContent || lines[0] || ''),
-      description: normalize(lines[1] || ''),
-      status: normalize(lines.find(line => /open|active|closed|archived|draft/i.test(line)) || ''),
-      candidate_count: normalize(lines.find(line => /\d+/.test(line) && /candidate|profile|lead/i.test(line)) || ''),
-      updated_at: normalize(lines.find(line => /updated|ago|today|yesterday/i.test(line)) || ''),
+      name,
+      description: normalize(description),
+      status: normalize(status),
+      candidate_count: normalize(candidateCount),
+      updated_at: normalize(updatedAt),
       url: href,
     });
   }
@@ -1792,30 +2254,84 @@ function extractRecruiterProjectsInPage(): RecruiterProjectSummary[] {
 function extractRecruiterSavedSearchesInPage(): RecruiterSavedSearchSummary[] {
   const normalize = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
   const uniq = (values: string[]) => [...new Set(values.map(value => normalize(value)).filter(Boolean))];
+  const absoluteUrl = (value: string) => {
+    const normalized = normalize(value);
+    if (!normalized) return '';
+    try {
+      return new URL(normalized, window.location.origin).toString();
+    } catch {
+      return normalized;
+    }
+  };
+  const selectedCadence = (() => {
+    const selected = document.querySelector<HTMLInputElement>(
+      'input[name="email-frequency"]:checked, [data-test-frequency-daily]:checked, [data-test-frequency-weekly]:checked',
+    );
+    const value = normalize(selected?.value || selected?.id || '');
+    if (/daily/i.test(value) || /每天/.test(value)) return 'daily';
+    if (/weekly/i.test(value) || /每周/.test(value)) return 'weekly';
+    return '';
+  })();
   const searches: RecruiterSavedSearchSummary[] = [];
-  const roots = new Set<Element>();
+  const roots = new Set<Element>(Array.from(
+    document.querySelectorAll('tbody tr.saved-searches__result, tr.saved-searches__result, [data-test-results-table] tbody tr'),
+  ));
 
-  for (const link of Array.from(document.querySelectorAll('a[href*="saved"], a[href*="search"]'))) {
-    const root = link.closest('li, article, section, [data-search-id], .artdeco-list__item') || link.parentElement;
-    if (root && /saved search|alert/i.test(String((root as HTMLElement).innerText || ''))) roots.add(root);
+  if (roots.size === 0) {
+    for (const link of Array.from(document.querySelectorAll('a[href*="saved"], a[href*="search"]'))) {
+      const root = link.closest('li, article, section, [data-search-id], .artdeco-list__item') || link.parentElement;
+      if (root && /saved search|alert|已保存的搜索|提醒/i.test(String((root as HTMLElement).innerText || ''))) roots.add(root);
+    }
   }
 
   for (const root of roots) {
-    const link = root.querySelector<HTMLAnchorElement>('a[href]');
-    const href = link?.href || '';
-    const searchId = root.getAttribute('data-search-id')
-      || href.match(/saved[^/?#]*\/([^/?#]+)/i)?.[1]
+    const nameLink = root.querySelector<HTMLAnchorElement>(
+      '[data-test-result-row-name] a[href], a.saved-searches__result-link[href], a[href*="savedSearch="]',
+    );
+    const resultsLink = root.querySelector<HTMLAnchorElement>(
+      '[data-test-result-row-link] a[href], a.saved-searches__result-new-link[href]',
+    );
+    const href = absoluteUrl(nameLink?.getAttribute('href') || resultsLink?.getAttribute('href') || '');
+    const searchId = normalize(
+      root.getAttribute('data-search-id')
+      || root.querySelector<HTMLInputElement>('input[id^="select-"]')?.id.replace(/^select-/, '')
+      || href.match(/savedSearch=urn%3Ali%3Ats_cap_saved_search%3A(\d+)/i)?.[1]
+      || href.match(/savedSearch=urn:li:ts_cap_saved_search:(\d+)/i)?.[1]
       || href.match(/[?&]searchId=([^&]+)/i)?.[1]
-      || '';
+      || '',
+    );
     const lines = uniq(String((root as HTMLElement).innerText || '').split('\n'));
     if (!searchId && lines.length === 0) continue;
 
+    const alertText = normalize(
+      root.querySelector('[data-test-result-row-alert-button]')?.getAttribute('title')
+      || root.querySelector('[data-test-result-row-alert-button] .a11y-text')?.textContent
+      || lines.find(line => /提醒|alert/i.test(line))
+      || '',
+    );
+    const cadence = /关闭.*提醒|提醒已开启|active/i.test(alertText)
+      ? (selectedCadence || 'on')
+      : /开启.*提醒|alert.*off/i.test(alertText)
+        ? 'off'
+        : selectedCadence;
+    const projectOrQuery = normalize(
+      root.querySelector('[data-test-result-project-name]')?.textContent
+      || lines.find(line => /显示.*搜索条件/.test(line))
+      || lines[2]
+      || '',
+    );
+    const resultCount = normalize(
+      root.querySelector('[data-test-result-row-link]')?.textContent
+      || lines.find(line => /\d/.test(line) && /新|result|candidate|profile|结果/.test(line))
+      || '',
+    );
+
     searches.push({
       search_id: searchId,
-      name: normalize(link?.textContent || lines[0] || ''),
-      query: normalize(lines.find(line => /title:|company:|location:|keyword/i.test(line)) || lines[1] || ''),
-      cadence: normalize(lines.find(line => /daily|weekly|instant|alert/i.test(line)) || ''),
-      result_count: normalize(lines.find(line => /\d+/.test(line) && /result|candidate|profile/i.test(line)) || ''),
+      name: normalize(nameLink?.textContent || lines.find(line => !/^选择/.test(line)) || lines[0] || ''),
+      query: projectOrQuery,
+      cadence,
+      result_count: resultCount,
       url: href,
     });
   }
@@ -1854,6 +2370,7 @@ function extractRecruiterInboxThreadsInPage(listSource: string): RecruiterInboxT
   const threadLikeSelectors = [
     '[data-conversation-id]',
     'a[href*="/talent/messages"]',
+    'a[href*="/talent/inbox/"][href*="/id/"]',
     'a[href*="/messaging/thread"]',
     'a[href*="/messages/thread"]',
     'a[href*="conversationId="]',
@@ -1872,13 +2389,14 @@ function extractRecruiterInboxThreadsInPage(listSource: string): RecruiterInboxT
   for (const root of roots) {
     const links = Array.from(root.querySelectorAll('a[href]')) as HTMLAnchorElement[];
     const profileLink = links.find(link => /\/in\/|\/talent\/profile\//.test(link.href));
-    const messageLink = links.find(link => /\/talent\/messages|\/messaging\/thread|\/messages\/thread|conversationId=/.test(link.href));
+    const messageLink = links.find(link => /\/talent\/messages|\/talent\/inbox\/|\/messaging\/thread|\/messages\/thread|conversationId=/.test(link.href));
     const profileUrl = profileLink ? decodeRedirect(profileLink.href) : '';
     const conversationId = normalize(
       root.getAttribute('data-conversation-id')
       || root.getAttribute('data-thread-id')
       || root.getAttribute('data-id')
       || messageLink?.href.match(/conversation(?:Id)?[=/]([^&#/?]+)/i)?.[1]
+      || messageLink?.href.match(/\/talent\/inbox\/[^?#]*\/id\/([^?#/]+)/i)?.[1]
       || messageLink?.href.match(/messages\/thread\/([^/?#]+)/i)?.[1]
       || '',
     );
@@ -1890,17 +2408,13 @@ function extractRecruiterInboxThreadsInPage(listSource: string): RecruiterInboxT
     const textLines = uniq(String((root as HTMLElement).innerText || '').split('\n'));
     const name = normalize(
       profileLink?.textContent
-      || root.querySelector('[data-anonymize="person-name"], [data-test-person-name], strong')?.textContent
+      || root.querySelector('[data-anonymize="person-name"], [data-test-person-name], [data-test-participant-name], strong')?.textContent
       || textLines[0]
       || ''
     );
-    const headline = normalize(
-      root.querySelector('[data-anonymize="headline"], [data-test-headline], [data-test-job-title]')?.textContent
-      || textLines.find(line => line !== name && !/(^\d+$|unread|new$)/i.test(line))
-      || ''
-    );
+    const headline = normalize(root.querySelector('[data-anonymize="headline"], [data-test-headline], [data-test-job-title], [data-test-participant-headline]')?.textContent || '');
     const lastTime = normalize(
-      root.querySelector('time')?.textContent
+      root.querySelector('[data-test-last-activity-time], time')?.textContent
       || textLines.find(line => /\b(today|yesterday|ago|mon|tue|wed|thu|fri|sat|sun|\d{1,2}:\d{2}|\d{1,2}\/\d{1,2})\b/i.test(line))
       || ''
     );
@@ -1910,7 +2424,7 @@ function extractRecruiterInboxThreadsInPage(listSource: string): RecruiterInboxT
       || ''
     );
     const lastMessage = normalize(
-      root.querySelector('[data-test-last-message], [data-testid*="message-snippet"], p, .conversation-snippet')?.textContent
+      root.querySelector('[data-test-conversation-snippet], [data-test-last-message], [data-testid*="message-snippet"], [data-test-message-deleted], [class*="conversation-snippet"]')?.textContent
       || [...textLines].reverse().find(line => line !== name && line !== headline && line !== lastTime && line !== unread)
       || ''
     );
@@ -1931,6 +2445,214 @@ function extractRecruiterInboxThreadsInPage(listSource: string): RecruiterInboxT
   }
 
   return threads;
+}
+
+function enrichRecruiterInboxThreadIdentitiesInPage(
+  threads: Array<Pick<RecruiterInboxThreadSummary, 'conversation_id' | 'candidate_id' | 'profile_url' | 'name' | 'headline' | 'last_message' | 'last_time' | 'unread' | 'list_source'>>,
+): Promise<RecruiterInboxThreadSummary[]> {
+  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+  const normalize = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
+  const base64UrlEncode = (value: string) => btoa(unescape(encodeURIComponent(value)))
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+  const isVisible = (el: Element | null | undefined) => {
+    if (!el) return false;
+    const rect = (el as HTMLElement).getBoundingClientRect?.();
+    const style = window.getComputedStyle(el as Element);
+    return Boolean(rect && rect.width >= 0 && rect.height >= 0 && style.visibility !== 'hidden' && style.display !== 'none');
+  };
+  const activate = (target: HTMLElement | null | undefined) => {
+    if (!target) return false;
+    target.scrollIntoView?.({ block: 'center', inline: 'center' });
+    for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click']) {
+      target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+    }
+    target.click?.();
+    return true;
+  };
+  const canonicalizeProfileUrl = (href: string) => {
+    try {
+      const parsed = new URL(href, window.location.origin);
+      const redirected = parsed.pathname === '/redir/redirect/'
+        ? parsed.searchParams.get('url') || href
+        : parsed.toString();
+      const finalUrl = new URL(redirected, window.location.origin);
+      finalUrl.hash = '';
+      for (const key of ['trk', 'trackingId', 'lipi']) finalUrl.searchParams.delete(key);
+      return finalUrl.toString();
+    } catch {
+      return normalize(href);
+    }
+  };
+  const textOf = (root: Element | null | undefined) => normalize(
+    `${(root as HTMLElement | null)?.innerText || ''} ${(root as HTMLElement | null)?.getAttribute?.('aria-label') || ''} ${(root as HTMLElement | null)?.getAttribute?.('title') || ''}`,
+  );
+  const findThreadAnchor = (conversationId: string) => {
+    const normalizedConversationId = normalize(conversationId);
+    if (!normalizedConversationId) return null;
+    return Array.from(document.querySelectorAll('a[href]')).find((link) => {
+      if (!isVisible(link)) return false;
+      const href = (link as HTMLAnchorElement).href || '';
+      return href.includes('/talent/inbox/') && href.includes('/id/') && href.includes(normalizedConversationId);
+    }) as HTMLAnchorElement | null;
+  };
+  const findThreadDetailIdentity = async () => {
+    const findProfileLink = () => {
+      const target = document.getElementById('thread-detail-jump-target');
+      return (
+        target?.querySelector('a[data-test-link-to-profile-link], a[data-live-test-link-to-profile-link], a[href*="/talent/profile/"], a[href*="/in/"]')
+        || Array.from(document.querySelectorAll('a[href]')).find((link) => {
+          const href = (link as HTMLAnchorElement).href || '';
+          return /\/talent\/profile\/|\/in\//.test(href);
+        })
+        || null
+      ) as HTMLAnchorElement | null;
+    };
+    const jumpLink = document.querySelector('a[data-test-jump-link], a[href="#thread-detail-jump-target"]') as HTMLElement | null;
+    if (jumpLink) activate(jumpLink);
+
+    let profileLink = findProfileLink();
+    for (let attempt = 0; attempt < 6 && !profileLink; attempt += 1) {
+      await sleep(800);
+      profileLink = findProfileLink();
+    }
+
+    const target = document.getElementById('thread-detail-jump-target');
+    const name = normalize(
+      target?.querySelector('[data-test-row-lockup-full-name], [data-live-test-row-lockup-full-name]')?.textContent
+      || profileLink?.textContent
+      || '',
+    );
+    const headline = normalize(
+      target?.querySelector('[data-test-row-lockup-headline], [data-live-test-row-lockup-headline]')?.textContent
+      || '',
+    );
+    return {
+      profileUrl: profileLink ? canonicalizeProfileUrl(profileLink.href) : '',
+      name,
+      headline,
+      targetText: textOf(target),
+    };
+  };
+
+  return (async () => {
+    const results: RecruiterInboxThreadSummary[] = [];
+    for (const thread of threads) {
+      const current: RecruiterInboxThreadSummary = {
+        conversation_id: normalize(thread.conversation_id),
+        candidate_id: normalize(thread.candidate_id),
+        profile_url: normalize(thread.profile_url),
+        name: normalize(thread.name),
+        headline: normalize(thread.headline),
+        last_message: normalize(thread.last_message),
+        last_time: normalize(thread.last_time),
+        unread: normalize(thread.unread),
+        list_source: normalize(thread.list_source),
+      };
+      if (current.conversation_id && (!current.profile_url || !current.candidate_id)) {
+        const anchor = findThreadAnchor(current.conversation_id);
+        if (anchor) {
+          activate(anchor);
+          await sleep(1500);
+          const detail = await findThreadDetailIdentity();
+          const profileUrl = detail.profileUrl;
+          if (profileUrl) {
+            current.profile_url = profileUrl;
+            if (!current.candidate_id) current.candidate_id = `url:${base64UrlEncode(profileUrl)}`;
+          }
+          if (!current.name && detail.name) current.name = detail.name;
+          if (!current.headline && detail.headline) current.headline = detail.headline;
+        }
+      }
+      results.push(current);
+    }
+    return results;
+  })();
+}
+
+function extractRecruiterInboxThreadIdentityInPage(
+  conversationId: string,
+  listSource: string,
+): Promise<RecruiterInboxThreadSummary | { error: string }> {
+  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+  const normalize = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
+  const base64UrlEncode = (value: string) => btoa(unescape(encodeURIComponent(value)))
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+  const canonicalizeProfileUrl = (href: string) => {
+    try {
+      const parsed = new URL(href, window.location.origin);
+      const redirected = parsed.pathname === '/redir/redirect/'
+        ? parsed.searchParams.get('url') || href
+        : parsed.toString();
+      const finalUrl = new URL(redirected, window.location.origin);
+      finalUrl.hash = '';
+      for (const key of ['trk', 'trackingId', 'lipi']) finalUrl.searchParams.delete(key);
+      return finalUrl.toString();
+    } catch {
+      return normalize(href);
+    }
+  };
+  const activate = (target: HTMLElement | null | undefined) => {
+    if (!target) return false;
+    target.scrollIntoView?.({ block: 'center', inline: 'center' });
+    for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click']) {
+      target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+    }
+    target.click?.();
+    return true;
+  };
+  const findProfileLink = () => {
+    const target = document.getElementById('thread-detail-jump-target');
+    return (
+      target?.querySelector('a[data-test-link-to-profile-link], a[data-live-test-link-to-profile-link], a[href*="/talent/profile/"], a[href*="/in/"]')
+      || Array.from(document.querySelectorAll('a[href]')).find((link) => {
+        const href = (link as HTMLAnchorElement).href || '';
+        return /\/talent\/profile\/|\/in\//.test(href);
+      })
+      || null
+    ) as HTMLAnchorElement | null;
+  };
+
+  return (async () => {
+    const jumpLink = document.querySelector('a[data-test-jump-link], a[href="#thread-detail-jump-target"]') as HTMLElement | null;
+    if (jumpLink) activate(jumpLink);
+
+    let profileLink = findProfileLink();
+    for (let attempt = 0; attempt < 6 && !profileLink; attempt += 1) {
+      await sleep(800);
+      profileLink = findProfileLink();
+    }
+
+    const target = document.getElementById('thread-detail-jump-target');
+    const profileUrl = profileLink ? canonicalizeProfileUrl(profileLink.href) : '';
+    if (!profileUrl) {
+      return { error: 'No visible profile link was found on the current Recruiter thread page.' };
+    }
+    const name = normalize(
+      target?.querySelector('[data-test-row-lockup-full-name], [data-live-test-row-lockup-full-name]')?.textContent
+      || profileLink?.textContent
+      || document.querySelector('[data-test-participant-name], [data-anonymize="person-name"], h1, h2')?.textContent
+      || '',
+    );
+    const headline = normalize(
+      target?.querySelector('[data-test-row-lockup-headline], [data-live-test-row-lockup-headline]')?.textContent
+      || '',
+    );
+    return {
+      conversation_id: normalize(conversationId),
+      candidate_id: `url:${base64UrlEncode(profileUrl)}`,
+      profile_url: profileUrl,
+      name,
+      headline,
+      last_message: '',
+      last_time: '',
+      unread: '',
+      list_source: normalize(listSource),
+    };
+  })();
 }
 
 function readRecruiterConversationMessagesInPage(
@@ -1967,7 +2689,8 @@ function readRecruiterConversationMessagesInPage(
         root.getAttribute('data-conversation-id')
         || root.getAttribute('data-thread-id')
         || root.getAttribute('data-id')
-        || links.find(link => /conversationId=|\/messages\/thread\/|\/messaging\/thread\//.test(link.href))?.href.match(/conversation(?:Id)?[=/]([^&#/?]+)/i)?.[1]
+        || links.find(link => /conversationId=|\/talent\/inbox\/|\/messages\/thread\/|\/messaging\/thread\//.test(link.href))?.href.match(/conversation(?:Id)?[=/]([^&#/?]+)/i)?.[1]
+        || links.find(link => /\/talent\/inbox\/[^?#]*\/id\/|\/messages\/thread\/|\/messaging\/thread\//.test(link.href))?.href.match(/\/talent\/inbox\/[^?#]*\/id\/([^?#/]+)/i)?.[1]
         || links.find(link => /\/messages\/thread\/|\/messaging\/thread\//.test(link.href))?.href.match(/messages\/thread\/([^/?#]+)/i)?.[1]
         || '',
       );
@@ -2121,7 +2844,8 @@ function replyRecruiterConversationInPage(
         root.getAttribute('data-conversation-id')
         || root.getAttribute('data-thread-id')
         || root.getAttribute('data-id')
-        || links.find(link => /conversationId=|\/messages\/thread\/|\/messaging\/thread\//.test(link.href))?.href.match(/conversation(?:Id)?[=/]([^&#/?]+)/i)?.[1]
+        || links.find(link => /conversationId=|\/talent\/inbox\/|\/messages\/thread\/|\/messaging\/thread\//.test(link.href))?.href.match(/conversation(?:Id)?[=/]([^&#/?]+)/i)?.[1]
+        || links.find(link => /\/talent\/inbox\/[^?#]*\/id\/|\/messages\/thread\/|\/messaging\/thread\//.test(link.href))?.href.match(/\/talent\/inbox\/[^?#]*\/id\/([^?#/]+)/i)?.[1]
         || links.find(link => /\/messages\/thread\/|\/messaging\/thread\//.test(link.href))?.href.match(/messages\/thread\/([^/?#]+)/i)?.[1]
         || '',
       );
@@ -2142,6 +2866,13 @@ function replyRecruiterConversationInPage(
     }) as HTMLElement | undefined;
   };
   const findReplyComposer = () => {
+    const isNoteReplySurface = (el: Element) => {
+      const noteRoot = el.closest('.note__reply, .create-edit-note, .create-edit-note__form, [data-test-create-edit-note-form], [data-live-test-create-edit-note-form]');
+      if (!noteRoot) return false;
+      const descriptor = textOf(noteRoot).toLowerCase();
+      const className = normalize((noteRoot as HTMLElement).className).toLowerCase();
+      return /note|notes|备注|输入备注文本/.test(`${descriptor} ${className}`);
+    };
     const selectors = [
       'textarea',
       'div[role="textbox"][contenteditable="true"]',
@@ -2153,9 +2884,11 @@ function replyRecruiterConversationInPage(
       const nodes = Array.from(document.querySelectorAll(selector));
       const target = nodes.find((el) => {
         if (!isVisible(el)) return false;
+        if (isNoteReplySurface(el)) return false;
         const text = textOf(el).toLowerCase();
         const placeholder = normalize((el as HTMLElement).getAttribute?.('placeholder') || (el as HTMLElement).getAttribute?.('data-placeholder') || '').toLowerCase();
-        return /reply|message|inmail/.test(`${text} ${placeholder}`);
+        const className = normalize((el as HTMLElement).className).toLowerCase();
+        return /reply|message|inmail|写新消息|回复|消息|发送消息/.test(`${text} ${placeholder} ${className}`);
       });
       if (target) return target as HTMLElement;
     }
@@ -2196,7 +2929,7 @@ function replyRecruiterConversationInPage(
 
     let composer = findReplyComposer();
     if (!composer) {
-      clickFirst(['reply', 'message', 'send message', 'inmail']);
+      clickFirst(['reply', 'message', 'send message', 'inmail', '回复', '消息', '发消息']);
       await sleep(700);
       composer = findReplyComposer();
     }
@@ -2207,7 +2940,7 @@ function replyRecruiterConversationInPage(
     setComposerValue(composer, normalizedText);
     await sleep(250);
 
-    const sent = clickFirst(['send', 'send message', 'send inmail']);
+    const sent = clickFirst(['send', 'send message', 'send inmail', '发送', '发送消息']);
     if (!sent) {
       return { error: 'Reply composer opened, but no send button was found.' };
     }
@@ -2218,6 +2951,7 @@ function replyRecruiterConversationInPage(
       conversationId
       || document.body.getAttribute('data-conversation-id')
       || window.location.href.match(/conversation(?:Id)?[=/]([^&#/?]+)/i)?.[1]
+      || window.location.href.match(/\/talent\/inbox\/[^?#]*\/id\/([^?#/]+)/i)?.[1]
       || window.location.href.match(/messages\/thread\/([^/?#]+)/i)?.[1]
       || '',
     );
@@ -2245,18 +2979,21 @@ function sendRecruiterMessageInPage(
 ): Promise<RecruiterMessageResult | { error: string }> {
   const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
   const normalize = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
+  const messageTriggerTerms = ['message', 'send message', 'inmail', 'send inmail', 'contact', '发消息', '发送消息', '发送 inmail', '联系候选人'];
+  const sendTerms = ['send inmail', 'send message', 'send', '发消息', '发送', '立即发送'];
   const isVisible = (el: Element | null | undefined) => {
     if (!el) return false;
     const rect = (el as HTMLElement).getBoundingClientRect?.();
     const style = window.getComputedStyle(el as Element);
     return Boolean(rect && rect.width >= 0 && rect.height >= 0 && style.visibility !== 'hidden' && style.display !== 'none');
   };
-  const matchesTerms = (el: Element, terms: string[]) => {
-    const haystack = normalize(
-      `${(el as HTMLElement).innerText || ''} ${(el as HTMLElement).getAttribute?.('aria-label') || ''} ${(el as HTMLElement).getAttribute?.('title') || ''}`,
-    ).toLowerCase();
-    return terms.some(term => haystack.includes(term));
-  };
+  const actionTextOf = (el: Element | null | undefined) => normalize(
+    `${(el as HTMLElement | null)?.innerText || ''} ${(el as HTMLElement | null)?.getAttribute?.('aria-label') || ''} ${(el as HTMLElement | null)?.getAttribute?.('title') || ''}`,
+  );
+  const metadataOf = (el: Element | null | undefined) => normalize(
+    `${(el as HTMLElement | null)?.innerText || ''} ${(el as HTMLElement | null)?.getAttribute?.('aria-label') || ''} ${(el as HTMLElement | null)?.getAttribute?.('title') || ''} ${(el as HTMLElement | null)?.getAttribute?.('placeholder') || ''} ${(el as HTMLElement | null)?.getAttribute?.('data-placeholder') || ''} ${(el as HTMLElement | null)?.className || ''}`,
+  );
+  const matchesTerms = (el: Element, terms: string[]) => terms.some(term => actionTextOf(el).toLowerCase().includes(term));
   const clickFirst = (terms: string[], root: ParentNode = document) => {
     const candidates = Array.from(root.querySelectorAll('button, a[role="button"], [role="button"], span[role="button"]'))
       .filter((el) => isVisible(el) && matchesTerms(el, terms));
@@ -2267,18 +3004,52 @@ function sendRecruiterMessageInPage(
     }
     return false;
   };
+  const visibleButtons = (root: ParentNode = document) => Array.from(root.querySelectorAll('button, a[role="button"], [role="button"], span[role="button"]'))
+    .filter((el) => isVisible(el))
+    .map((el) => actionTextOf(el))
+    .filter(Boolean)
+    .slice(0, 20);
+  const findComposerSurface = () => Array.from(document.querySelectorAll('aside, [role="dialog"], section, [data-test-rich-text-editor], [data-live-test-rich-text-editor]'))
+    .find((el) => isVisible(el) && /close editor|preview|send message|send inmail|发消息|发送|关闭编辑器|预览/i.test(metadataOf(el)));
+  const isComposerLike = (el: Element) => {
+    const metadata = metadataOf(el).toLowerCase();
+    const className = normalize((el as HTMLElement).className).toLowerCase();
+    if (/\bql-editor\b/.test(className)) return true;
+    if (/(^|[^a-z])search([^a-z]|$)|搜索/.test(metadata) && !/message|compose|draft|inmail|发消息|撰写消息|写新消息|草稿/.test(metadata)) {
+      return false;
+    }
+    if (/message|compose|draft|inmail|发消息|发送消息|写新消息|撰写消息|草稿/.test(metadata)) return true;
+    const parentSurface = el.closest('aside, [role="dialog"], [data-test-rich-text-editor], [data-live-test-rich-text-editor]');
+    return Boolean(parentSurface && /close editor|preview|send|关闭编辑器|预览|发送|发消息/.test(metadataOf(parentSurface).toLowerCase()));
+  };
   const findComposer = (root: ParentNode = document) => {
     const selectors = [
+      '[data-test-rich-text-editor] .ql-editor[contenteditable="true"]',
+      '[data-live-test-rich-text-editor] .ql-editor[contenteditable="true"]',
+      '.ql-editor[contenteditable="true"]',
       'textarea',
       'div[role="textbox"][contenteditable="true"]',
       '[contenteditable="true"][data-placeholder]',
       'div[contenteditable="true"]',
       '[role="textbox"]',
+      'input',
     ];
     for (const selector of selectors) {
       const nodes = Array.from(root.querySelectorAll(selector));
-      const target = nodes.find((el) => isVisible(el));
+      const target = nodes.find((el) => isVisible(el) && isComposerLike(el));
       if (target) return target as HTMLElement;
+    }
+    return null;
+  };
+  const waitForComposer = async () => {
+    for (let attempt = 0; attempt < 16; attempt += 1) {
+      const surface = findComposerSurface() || document;
+      const candidate = findComposer(surface);
+      if (candidate) return candidate;
+      const composerMarkersVisible = window.location.href.includes('rightRail=composer')
+        || visibleButtons(document).some(label => /close editor|preview|send|关闭编辑器|预览|发送|发消息/i.test(label));
+      if (!composerMarkersVisible && attempt >= 6) break;
+      await sleep(250);
     }
     return null;
   };
@@ -2286,11 +3057,40 @@ function sendRecruiterMessageInPage(
     el.focus();
     if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) {
       el.value = value;
+    } else if (el.classList.contains('ql-editor')) {
+      const paragraph = document.createElement('p');
+      paragraph.textContent = value;
+      el.replaceChildren(paragraph);
     } else {
       el.textContent = value;
     }
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  const decodeCandidate = (value: string) => {
+    const raw = normalize(value);
+    if (!raw.startsWith('url:')) return raw;
+    const base64 = raw.slice(4).replace(/-/g, '+').replace(/_/g, '/');
+    const padding = (4 - (base64.length % 4)) % 4;
+    try {
+      return decodeURIComponent(escape(atob(base64 + '='.repeat(padding))));
+    } catch {
+      return '';
+    }
+  };
+  const findCandidateRoot = () => {
+    const candidateUrl = decodeCandidate(candidateId);
+    const candidateToken = normalize(candidateUrl.match(/\/talent\/profile\/([^/?#]+)/i)?.[1]);
+    const anchors = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]'));
+    const link = anchors.find((anchor) => {
+      const href = normalize(anchor.href);
+      if (!href) return false;
+      if (candidateUrl && href === candidateUrl) return true;
+      if (candidateToken && href.includes(`/talent/profile/${candidateToken}`)) return true;
+      return false;
+    });
+    return link?.closest('li, article, section, div') || null;
   };
 
   return (async () => {
@@ -2299,15 +3099,29 @@ function sendRecruiterMessageInPage(
 
     let composer = findComposer();
     if (!composer) {
-      clickFirst(['message', 'send message', 'inmail', 'send inmail', 'contact']);
-      await sleep(800);
-      composer = findComposer();
+      const candidateRoot = findCandidateRoot() || document;
+      clickFirst(messageTriggerTerms, candidateRoot);
+      for (let attempt = 0; attempt < 6 && !composer; attempt += 1) {
+        await sleep(250);
+        const surface = findComposerSurface();
+        composer = findComposer(surface || document);
+        if (!composer && !window.location.href.includes('rightRail=composer') && attempt === 2) {
+          clickFirst(messageTriggerTerms);
+        }
+      }
+    }
+    if (!composer) {
+      composer = await waitForComposer();
     }
 
     const dialog = Array.from(document.querySelectorAll('[role="dialog"], .artdeco-modal, aside'))
       .find((el) => isVisible(el));
-    if (!composer && dialog) {
-      composer = findComposer(dialog);
+    const composerSurface = findComposerSurface() || dialog || document;
+    if (!composer && composerSurface) {
+      composer = findComposer(composerSurface);
+    }
+    if (!composer) {
+      composer = await waitForComposer();
     }
     if (!composer) {
       return { error: 'No visible message composer was found on the current LinkedIn page.' };
@@ -2316,10 +3130,11 @@ function sendRecruiterMessageInPage(
     setComposerValue(composer, trimmed);
     await sleep(250);
 
-    const sendRoot = dialog || document;
-    const sent = clickFirst(['send inmail', 'send message', 'send'], sendRoot);
+    const sent = clickFirst(sendTerms, composerSurface) || (composerSurface !== document && clickFirst(sendTerms, document));
     if (!sent) {
-      return { error: 'Message composer opened, but no send button was found.' };
+      return {
+        error: `Message composer opened, but no send button was found. Visible buttons: ${visibleButtons(composerSurface).join(' | ') || visibleButtons(document).join(' | ') || '(none)'}`,
+      };
     }
 
     await sleep(1000);
@@ -2328,6 +3143,7 @@ function sendRecruiterMessageInPage(
       (dialog?.getAttribute('data-conversation-id') || '')
       || (document.body.getAttribute('data-conversation-id') || '')
       || (window.location.href.match(/conversation(?:Id)?[=/]([^&#/?]+)/i)?.[1] || '')
+      || (window.location.href.match(/\/talent\/inbox\/[^?#]*\/id\/([^?#/]+)/i)?.[1] || '')
       || (window.location.href.match(/messages\/thread\/([^/?#]+)/i)?.[1] || ''),
     );
     const profileUrl = normalize(
@@ -2363,9 +3179,18 @@ function saveCandidateToProjectInPage(
   const textOf = (el: Element | null | undefined) => normalize(
     `${(el as HTMLElement | null)?.innerText || ''} ${(el as HTMLElement | null)?.getAttribute?.('aria-label') || ''} ${(el as HTMLElement | null)?.getAttribute?.('title') || ''}`,
   );
+  const visibleButtons = (root: ParentNode = document) => Array.from(root.querySelectorAll('button, a[role="button"], [role="button"], span[role="button"]'))
+    .filter((el) => isVisible(el))
+    .map((el) => textOf(el))
+    .filter(Boolean)
+    .slice(0, 20);
+  const isProfileSurface = () => /\/talent\/profile\//i.test(window.location.href);
+  const isStageSaveLabel = (value: string) => /save to pipeline|save to stage|保存到备选人才|备选人才阶段|选择要保存至的备选人才阶段/i.test(normalize(value));
+  const isCrossProjectLabel = (value: string) => /save to project|add to project|project chooser|保存到项目|添加到项目/i.test(normalize(value));
   const clickFirst = (terms: string[], root: ParentNode = document) => {
+    const normalizedTerms = terms.map(term => normalize(term).toLowerCase()).filter(Boolean);
     const nodes = Array.from(root.querySelectorAll('button, a[role="button"], [role="button"], span[role="button"]'))
-      .filter((el) => isVisible(el) && terms.some(term => textOf(el).toLowerCase().includes(term)));
+      .filter((el) => isVisible(el) && normalizedTerms.some(term => textOf(el).toLowerCase().includes(term)));
     const target = nodes[0] as HTMLElement | undefined;
     if (target) {
       target.click();
@@ -2373,8 +3198,58 @@ function saveCandidateToProjectInPage(
     }
     return false;
   };
+  const clickMoreActionsTrigger = (root: ParentNode = document) => {
+    const trigger = (root.querySelector('.more-actions__trigger') || document.querySelector('.more-actions__trigger')) as HTMLElement | null;
+    if (!trigger || !isVisible(trigger)) return false;
+    trigger.click();
+    return true;
+  };
   const findProjectPanel = () => Array.from(document.querySelectorAll('[role="dialog"], .artdeco-modal, aside, section'))
-    .find((el) => isVisible(el) && /project|pipeline|save/i.test(textOf(el)));
+    .find((el) => {
+      if (!isVisible(el)) return false;
+      const label = textOf(el);
+      return isCrossProjectLabel(label) && !isStageSaveLabel(label);
+    });
+  const inspectMoreActionsDropdown = (): RecruiterMoreActionsDropdownState | null => {
+    const trigger = document.querySelector('.more-actions__trigger');
+    const dropdown = document.querySelector('.more-actions__dropdown-content') as HTMLElement | null;
+    if (!trigger && !dropdown) return null;
+    const style = dropdown ? window.getComputedStyle(dropdown) : null;
+    const wrapper = trigger?.closest('.more-actions');
+    return {
+      opened: Boolean(
+        wrapper?.classList.contains('artdeco-dropdown--is-open')
+        || trigger?.getAttribute('aria-expanded') === 'true'
+        || dropdown?.getAttribute('aria-hidden') === 'false',
+      ),
+      ariaHidden: normalize(dropdown?.getAttribute('aria-hidden') || ''),
+      childCount: dropdown?.children?.length || 0,
+      text: textOf(dropdown),
+      visibility: normalize(style?.visibility || ''),
+      opacity: normalize(style?.opacity || ''),
+      zIndex: normalize(style?.zIndex || ''),
+    };
+  };
+  const describeBlocker = (stageButtons: string[], buttonLabels: string[], moreActions: RecruiterMoreActionsDropdownState | null) => {
+    const renderedText = normalize(moreActions?.text);
+    if (moreActions?.opened && (moreActions.childCount ?? 0) === 0 && !renderedText) {
+      const state = [
+        `childCount=${moreActions.childCount ?? 0}`,
+        `ariaHidden=${normalize(moreActions.ariaHidden) || '(unset)'}`,
+        `visibility=${normalize(moreActions.visibility) || '(unset)'}`,
+        `opacity=${normalize(moreActions.opacity) || '(unset)'}`,
+        `zIndex=${normalize(moreActions.zIndex) || '(unset)'}`,
+      ].join(', ');
+      const stageSuffix = stageButtons.length > 0
+        ? ` Only stage-save actions were visible elsewhere: ${stageButtons.join(' | ')}.`
+        : '';
+      return `Recruiter more-actions opened, but LinkedIn did not populate a visible cross-project menu on this profile. Dropdown state: ${state}.${stageSuffix}`;
+    }
+    if (stageButtons.length > 0) {
+      return `Only stage-save actions were visible on the current Recruiter profile, not a cross-project chooser. Visible save actions: ${stageButtons.join(' | ')}`;
+    }
+    return `No visible Recruiter cross-project chooser was found on the current profile page. Visible buttons: ${buttonLabels.join(' | ') || '(none)'}`;
+  };
   const findProjectOption = (root: ParentNode) => {
     const candidates = Array.from(root.querySelectorAll('label, li, button, [role="option"], [data-project-id], input[type="checkbox"], input[type="radio"]'));
     for (const node of candidates) {
@@ -2391,24 +3266,58 @@ function saveCandidateToProjectInPage(
     }
     return null;
   };
+  const decodeCandidate = (value: string) => {
+    const raw = normalize(value);
+    if (!raw.startsWith('url:')) return raw;
+    const base64 = raw.slice(4).replace(/-/g, '+').replace(/_/g, '/');
+    const padding = (4 - (base64.length % 4)) % 4;
+    try {
+      return decodeURIComponent(escape(atob(base64 + '='.repeat(padding))));
+    } catch {
+      return '';
+    }
+  };
+  const findCandidateRoot = () => {
+    const candidateUrl = decodeCandidate(candidateId);
+    const candidateToken = normalize(candidateUrl.match(/\/talent\/profile\/([^/?#]+)/i)?.[1]);
+    const anchors = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]'));
+    const link = anchors.find((anchor) => {
+      const href = normalize(anchor.href);
+      if (!href) return false;
+      if (candidateUrl && href === candidateUrl) return true;
+      if (candidateToken && href.includes(`/talent/profile/${candidateToken}`)) return true;
+      return false;
+    });
+    return link?.closest('li, article, section, div') || null;
+  };
 
   return (async () => {
     if (!normRef) return { error: 'project-id is required.' };
+    if (!isProfileSurface()) {
+      return { error: 'Cross-project save must start from a visible LinkedIn Recruiter candidate profile page.' };
+    }
 
     let panel = findProjectPanel();
     if (!panel) {
-      clickFirst(['save to project', 'add to project', 'save', 'project', 'pipeline']);
+      const candidateRoot = findCandidateRoot() || document;
+      clickMoreActionsTrigger(candidateRoot) || clickFirst(['more actions', '更多操作'], candidateRoot);
+      await sleep(900);
+      clickFirst(['save to project', 'add to project', '保存到项目', '添加到项目']);
       await sleep(900);
       panel = findProjectPanel();
     }
     if (!panel) {
-      return { error: 'No visible Recruiter project chooser was found on the current page.' };
+      const buttons = visibleButtons();
+      const stageButtons = buttons.filter(label => isStageSaveLabel(label));
+      return {
+        error: describeBlocker(stageButtons, buttons, inspectMoreActionsDropdown()),
+      };
     }
 
     let option = findProjectOption(panel);
     if (!option) {
       const searchInput = Array.from(panel.querySelectorAll('input, textarea'))
-        .find((el) => isVisible(el) && /search|project/i.test(textOf(el) || el.getAttribute('placeholder') || '')) as HTMLInputElement | undefined;
+        .find((el) => isVisible(el) && /search|project|搜索|项目/i.test(textOf(el) || el.getAttribute('placeholder') || '')) as HTMLInputElement | undefined;
       if (searchInput) {
         searchInput.focus();
         searchInput.value = normalize(projectRef);
@@ -2425,7 +3334,355 @@ function saveCandidateToProjectInPage(
     option.clickable.click();
     await sleep(300);
 
-    const confirmed = clickFirst(['save', 'add', 'done', 'confirm'], panel);
+    const confirmed = clickFirst(['save', 'add', 'done', 'confirm', '保存', '添加', '完成', '确认'], panel);
+    if (!confirmed) {
+      const checkbox = option.clickable.querySelector<HTMLInputElement>('input[type="checkbox"], input[type="radio"]');
+      if (checkbox && !checkbox.checked) checkbox.click();
+    }
+    await sleep(800);
+
+    const profileUrl = normalize(
+      (document.querySelector<HTMLAnchorElement>('a[href*="/in/"], a[href*="/talent/profile/"]')?.href || '')
+      || window.location.href,
+    );
+
+    return {
+      candidate_id: normalize(candidateId),
+      project_id: normalize(projectRef),
+      project_name: option.name,
+      profile_url: profileUrl,
+      status: 'saved',
+      detail: `Saved candidate to project ${option.name}`,
+      list_source: listSource,
+    };
+  })();
+}
+
+function saveCandidateToProjectInPageV2(
+  projectRef: string,
+  candidateId: string,
+  listSource: string,
+): Promise<RecruiterSaveToProjectResult | { error: string }> {
+  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+  const normalize = (value: unknown) => String(value ?? '').replace(/\s+/g, ' ').trim();
+  const normRef = normalize(projectRef).toLowerCase();
+  const isVisible = (el: Element | null | undefined) => {
+    if (!el) return false;
+    const rect = (el as HTMLElement).getBoundingClientRect?.();
+    const style = window.getComputedStyle(el as Element);
+    return Boolean(rect && rect.width >= 0 && rect.height >= 0 && style.visibility !== 'hidden' && style.display !== 'none');
+  };
+  const textOf = (el: Element | null | undefined) => normalize(
+    `${(el as HTMLElement | null)?.innerText || ''} ${(el as HTMLElement | null)?.getAttribute?.('aria-label') || ''} ${(el as HTMLElement | null)?.getAttribute?.('title') || ''}`,
+  );
+  const visibleButtons = (root: ParentNode = document) => Array.from(root.querySelectorAll('button, a[role="button"], [role="button"], span[role="button"]'))
+    .filter((el) => isVisible(el))
+    .map((el) => textOf(el))
+    .filter(Boolean)
+    .slice(0, 20);
+  const isProfileSurface = () => /\/talent\/profile\//i.test(window.location.href);
+  const isStageSaveLabel = (value: string) => /save to pipeline|save to stage|save to prospects|move stage|change stage|保存到备选人才|更改阶段|候选人阶段/i.test(normalize(value));
+  const isCrossProjectLabel = (value: string) => /save to project|add to project|project chooser|existing project|select existing project|保存到项目|添加到项目|选择现有项目/i.test(normalize(value));
+  const activateElement = (target: HTMLElement | null | undefined) => {
+    if (!target) return false;
+    target.scrollIntoView?.({ block: 'center', inline: 'center' });
+    for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click']) {
+      target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+    }
+    target.click();
+    return true;
+  };
+  const clickFirst = (terms: string[], root: ParentNode = document) => {
+    const normalizedTerms = terms.map(term => normalize(term).toLowerCase()).filter(Boolean);
+    const nodes = Array.from(root.querySelectorAll('button, a[role="button"], [role="button"], span[role="button"]'))
+      .filter((el) => isVisible(el) && normalizedTerms.some(term => textOf(el).toLowerCase().includes(term)));
+    const target = nodes[0] as HTMLElement | undefined;
+    return activateElement(target);
+  };
+  const clickVisibleProjectSaveButton = (root: ParentNode = document) => clickFirst(
+    ['save to project', 'add to project', '保存到项目', '添加到项目'],
+    root,
+  );
+  const clickMoreActionsTrigger = (root: ParentNode = document) => {
+    const trigger = (root.querySelector('.more-actions__trigger') || document.querySelector('.more-actions__trigger')) as HTMLElement | null;
+    if (!trigger || !isVisible(trigger)) return false;
+    return activateElement(trigger);
+  };
+  const findProjectPanel = () => {
+    const allPanels = Array.from(document.querySelectorAll('[role="dialog"], .artdeco-modal, aside, section'))
+      .filter((el) => isVisible(el));
+    const rightRailPanels = allPanels.filter((el) => {
+      const label = textOf(el);
+      const classBits = normalize((el as HTMLElement).className || '');
+      const tagName = normalize(el.tagName || '');
+      return /aside/i.test(tagName)
+        || /right-rail|rightrail|drawer|flyout|side-panel|sidepanel/i.test(classBits)
+        || /new project|project name|existing project|select existing project|新建项目|项目名称|选择现有项目/i.test(label);
+    });
+    const candidates = /rightRail=saveToProject/i.test(window.location.href) && rightRailPanels.length > 0
+      ? rightRailPanels
+      : allPanels;
+
+    return candidates.find((el) => {
+      const label = textOf(el);
+      const looksLikeSaveRightRail = /rightRail=saveToProject/i.test(window.location.href)
+        && /new project|project name|existing project|select existing project|新建项目|项目名称|选择现有项目|收藏/i.test(label);
+      return (isCrossProjectLabel(label) || looksLikeSaveRightRail) && !isStageSaveLabel(label);
+    });
+  };
+  const inspectMoreActionsDropdown = (): RecruiterMoreActionsDropdownState | null => {
+    const trigger = document.querySelector('.more-actions__trigger');
+    const dropdown = document.querySelector('.more-actions__dropdown-content') as HTMLElement | null;
+    if (!trigger && !dropdown) return null;
+    const style = dropdown ? window.getComputedStyle(dropdown) : null;
+    const wrapper = trigger?.closest('.more-actions');
+    return {
+      opened: Boolean(
+        wrapper?.classList.contains('artdeco-dropdown--is-open')
+        || trigger?.getAttribute('aria-expanded') === 'true'
+        || dropdown?.getAttribute('aria-hidden') === 'false',
+      ),
+      ariaHidden: normalize(dropdown?.getAttribute('aria-hidden') || ''),
+      childCount: dropdown?.children?.length || 0,
+      text: textOf(dropdown),
+      visibility: normalize(style?.visibility || ''),
+      opacity: normalize(style?.opacity || ''),
+      zIndex: normalize(style?.zIndex || ''),
+    };
+  };
+  const describeBlocker = (stageButtons: string[], buttonLabels: string[], moreActions: RecruiterMoreActionsDropdownState | null) => {
+    const renderedText = normalize(moreActions?.text);
+    if (moreActions?.opened && (moreActions.childCount ?? 0) === 0 && !renderedText) {
+      const state = [
+        `childCount=${moreActions.childCount ?? 0}`,
+        `ariaHidden=${normalize(moreActions.ariaHidden) || '(unset)'}`,
+        `visibility=${normalize(moreActions.visibility) || '(unset)'}`,
+        `opacity=${normalize(moreActions.opacity) || '(unset)'}`,
+        `zIndex=${normalize(moreActions.zIndex) || '(unset)'}`,
+      ].join(', ');
+      const stageSuffix = stageButtons.length > 0
+        ? ` Only stage-save actions were visible elsewhere: ${stageButtons.join(' | ')}.`
+        : '';
+      return `Recruiter more-actions opened, but LinkedIn did not populate a visible cross-project menu on this profile. Dropdown state: ${state}.${stageSuffix}`;
+    }
+    if (stageButtons.length > 0) {
+      return `Only stage-save actions were visible on the current Recruiter profile, not a cross-project chooser. Visible save actions: ${stageButtons.join(' | ')}`;
+    }
+    return `No visible Recruiter cross-project chooser was found on the current profile page. Visible buttons: ${buttonLabels.join(' | ') || '(none)'}`;
+  };
+  const findProjectOption = (root: ParentNode) => {
+    const candidates = Array.from(root.querySelectorAll('label, li, button, [role="option"], [data-project-id], [data-id], input[type="checkbox"], input[type="radio"], a'));
+    for (const node of candidates) {
+      const el = node as HTMLElement;
+      const datasetBits = [
+        el.getAttribute('data-project-id') || '',
+        el.getAttribute('data-id') || '',
+        el.getAttribute('value') || '',
+        textOf(el),
+      ].join(' ').toLowerCase();
+      if (!datasetBits || !datasetBits.includes(normRef)) continue;
+      const clickable = (el.closest('label, button, li, [role="option"], a') || el) as HTMLElement;
+      return { clickable, name: textOf(clickable) || normalize(projectRef) };
+    }
+    return null;
+  };
+  const findProjectOptionAnywhere = () => findProjectOption(document);
+  const setInputValue = (input: HTMLInputElement | HTMLTextAreaElement, value: string) => {
+    const prototype = input instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : HTMLInputElement.prototype;
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
+    descriptor?.set?.call(input, value);
+    if (!descriptor?.set) input.value = value;
+  };
+  const describeProjectPanelState = (root: ParentNode) => {
+    const panel = root as Element;
+    const text = textOf(panel).slice(0, 320) || '(none)';
+    const container = panel as HTMLElement;
+    const inputs = Array.from(root.querySelectorAll('input, textarea'))
+      .map((node) => {
+        const el = node as HTMLInputElement | HTMLTextAreaElement;
+        if (!isVisible(el)) return '';
+        return normalize([
+          el.getAttribute('type') || '',
+          el.getAttribute('placeholder') || '',
+          el.getAttribute('aria-label') || '',
+          el.getAttribute('name') || '',
+          el.getAttribute('id') || '',
+        ].join(' '));
+      })
+      .filter(Boolean)
+      .slice(0, 6);
+    const options = Array.from(root.querySelectorAll('label, li, button, [role="option"], a'))
+      .map((node) => textOf(node as Element))
+      .filter(Boolean)
+      .slice(0, 10);
+    return `Chooser state: url=${normalize(window.location.href) || '(unknown)'}; tag=${normalize(panel.tagName || '') || '(unknown)'}; class=${normalize(container.className || '') || '(none)'}; text=${text}; inputs=${inputs.join(' | ') || '(none)'}; options=${options.join(' | ') || '(none)'}`;
+  };
+  const ensureExistingProjectMode = async (root: ParentNode) => {
+    const rawPanelLabel = textOf(root as Element);
+    const panelLabel = `${rawPanelLabel} ${/select existing project|existing project|选择现有项目/i.test(rawPanelLabel) ? '閫夋嫨鐜版湁椤圭洰' : ''}`.trim();
+    if (!/select existing project|existing project|选择现有项目/i.test(panelLabel)) return;
+    const controls = Array.from(root.querySelectorAll('label, button, span, div, [role="button"], [role="tab"], [role="radio"], input[type="radio"]'));
+    const target = controls.find((node) => {
+      const el = node as HTMLElement;
+      const label = `${textOf(el)} ${textOf(el.closest('label'))}`;
+      const matchesExistingProject = /select existing project|existing project|选择现有项目/i.test(label);
+      return matchesExistingProject
+        && isVisible((el.closest('label, button, [role="button"], [role="tab"], [role="radio"]') as HTMLElement | null) || el);
+      return /select existing project|existing project|选择现有项目/i.test(label);
+    }) as HTMLElement | undefined;
+    if (!target) return;
+
+    const radio = target.matches('input[type="radio"]')
+      ? target as HTMLInputElement
+      : target.querySelector<HTMLInputElement>('input[type="radio"]');
+    if (radio?.checked) return;
+
+    (target.closest('label, button, [role="button"], [role="tab"], [role="radio"]') as HTMLElement | null || target).click();
+    await sleep(500);
+  };
+  const ensureExistingProjectModeV2 = async (root: ParentNode) => {
+    const panelLabel = textOf(root as Element);
+    if (!/select existing project|existing project|选择现有项目/i.test(panelLabel)) return;
+    const controls = Array.from(root.querySelectorAll('label, button, span, div, [role="button"], [role="tab"], [role="radio"], input[type="radio"]'));
+    const target = controls.find((node) => {
+      const el = node as HTMLElement;
+      const label = `${textOf(el)} ${textOf(el.closest('label'))}`;
+      const matchesExistingProject = /select existing project|existing project|选择现有项目/i.test(label);
+      return matchesExistingProject
+        && isVisible((el.closest('label, button, [role="button"], [role="tab"], [role="radio"]') as HTMLElement | null) || el);
+    }) as HTMLElement | undefined;
+    if (!target) return;
+
+    const clickable = (target.closest('label, button, [role="button"], [role="tab"], [role="radio"]') as HTMLElement | null || target);
+    const explicitRadio = root.querySelector<HTMLInputElement>('input[type="radio"][id*="choose-existing"], input[type="radio"][name*="choose-existing"], input[type="radio"][value*="choose-existing"]');
+    if (!explicitRadio?.checked) {
+      activateElement(clickable);
+      await sleep(500);
+    }
+    if (explicitRadio && !explicitRadio.checked) {
+      activateElement(explicitRadio);
+      await sleep(500);
+    }
+  };
+  const findProjectSearchInput = (root: ParentNode) => Array.from(root.querySelectorAll('input, textarea'))
+    .find((node) => {
+      const el = node as HTMLInputElement | HTMLTextAreaElement;
+      if (!isVisible(el)) return false;
+      const descriptor = [
+        textOf(el),
+        el.getAttribute('placeholder') || '',
+        el.getAttribute('aria-label') || '',
+        el.getAttribute('name') || '',
+        el.getAttribute('id') || '',
+        textOf(el.closest('label')),
+        textOf(el.parentElement),
+      ].join(' ');
+      const boostedDescriptor = /选择现有项目|项目|项目名称/i.test(descriptor)
+        ? `${descriptor} existing project project`
+        : descriptor;
+      return /search|find|project|existing project|选择现有项目|项目|项目名称/i.test(descriptor);
+    }) as HTMLInputElement | HTMLTextAreaElement | undefined;
+  const decodeCandidate = (value: string) => {
+    const raw = normalize(value);
+    if (!raw.startsWith('url:')) return raw;
+    const base64 = raw.slice(4).replace(/-/g, '+').replace(/_/g, '/');
+    const padding = (4 - (base64.length % 4)) % 4;
+    try {
+      return decodeURIComponent(escape(atob(base64 + '='.repeat(padding))));
+    } catch {
+      return '';
+    }
+  };
+  const findCandidateRoot = () => {
+    const candidateUrl = decodeCandidate(candidateId);
+    const candidateToken = normalize(candidateUrl.match(/\/talent\/profile\/([^/?#]+)/i)?.[1]);
+    const anchors = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]'));
+    const link = anchors.find((anchor) => {
+      const href = normalize(anchor.href);
+      if (!href) return false;
+      if (candidateUrl && href === candidateUrl) return true;
+      if (candidateToken && href.includes(`/talent/profile/${candidateToken}`)) return true;
+      return false;
+    });
+    return link?.closest('li, article, section, div') || null;
+  };
+
+  return (async () => {
+    if (!normRef) return { error: 'project-id is required.' };
+    if (!isProfileSurface()) {
+      return { error: 'Cross-project save must start from a visible LinkedIn Recruiter candidate profile page.' };
+    }
+
+    let panel = findProjectPanel();
+    if (!panel && /rightRail=saveToProject/i.test(window.location.href)) {
+      clickVisibleProjectSaveButton();
+      await sleep(1200);
+      panel = findProjectPanel();
+    }
+    if (!panel) {
+      clickVisibleProjectSaveButton();
+      await sleep(1200);
+      if (!findProjectPanel()) {
+        clickVisibleProjectSaveButton();
+        await sleep(1500);
+      }
+      panel = findProjectPanel();
+    }
+    if (!panel) {
+      const candidateRoot = findCandidateRoot() || document;
+      clickMoreActionsTrigger(candidateRoot) || clickFirst(['more actions', '更多操作'], candidateRoot);
+      await sleep(900);
+      clickVisibleProjectSaveButton();
+      await sleep(900);
+      panel = findProjectPanel();
+    }
+    if (!panel) {
+      const buttons = visibleButtons();
+      const stageButtons = buttons.filter(label => isStageSaveLabel(label));
+      return {
+        error: describeBlocker(stageButtons, buttons, inspectMoreActionsDropdown()),
+      };
+    }
+
+    await ensureExistingProjectModeV2(panel);
+    panel = findProjectPanel() || panel;
+
+    let option = findProjectOption(panel) || findProjectOptionAnywhere();
+    if (!option) {
+      const searchInput = findProjectSearchInput(panel);
+      if (searchInput) {
+        searchInput.focus();
+        searchInput.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
+        await sleep(250);
+        option = findProjectOption(panel) || findProjectOptionAnywhere();
+        if (!option) {
+          const existingValue = normalize((searchInput as HTMLInputElement | HTMLTextAreaElement).value || '');
+          if (existingValue.toLowerCase() !== normRef) {
+            setInputValue(searchInput, '');
+            searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+            searchInput.dispatchEvent(new Event('change', { bubbles: true }));
+            setInputValue(searchInput, normalize(projectRef));
+            searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+            searchInput.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+          searchInput.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'ArrowDown' }));
+          searchInput.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'ArrowDown' }));
+          await sleep(1200);
+          option = findProjectOption(panel) || findProjectOptionAnywhere();
+        }
+      }
+    }
+    if (!option) {
+      return { error: `Project "${projectRef}" was not visible in the Recruiter project chooser. ${describeProjectPanelState(panel)}` };
+    }
+
+    option.clickable.click();
+    await sleep(500);
+
+    const confirmed = clickFirst(['save', 'add', 'done', 'confirm', '收藏', '保存', '添加', '完成', '确认'], panel)
+      || clickFirst(['save', 'add', 'done', 'confirm', '收藏', '保存', '添加', '完成', '确认']);
     if (!confirmed) {
       const checkbox = option.clickable.querySelector<HTMLInputElement>('input[type="checkbox"], input[type="radio"]');
       if (checkbox && !checkbox.checked) checkbox.click();
@@ -2470,13 +3727,31 @@ function addRecruiterTagInPage(
       .filter((el) => isVisible(el) && terms.some(term => textOf(el).toLowerCase().includes(term)));
     const target = nodes[0] as HTMLElement | undefined;
     if (target) {
+      target.scrollIntoView?.({ block: 'center', inline: 'center' });
+      for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click']) {
+        target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+      }
       target.click();
       return true;
     }
     return false;
   };
-  const findPanel = () => Array.from(document.querySelectorAll('[role="dialog"], .artdeco-modal, aside, section'))
-    .find((el) => isVisible(el) && /tag|label/i.test(textOf(el)));
+  const findPanel = () => Array.from(document.querySelectorAll('[role="dialog"], .artdeco-modal, aside, section, div'))
+    .find((el) => isVisible(el) && /tag|label|标签|搜索标签/i.test(textOf(el)));
+  const findTagInput = (root: ParentNode = document) => Array.from(root.querySelectorAll('input, textarea'))
+    .find((node) => {
+      const el = node as HTMLInputElement | HTMLTextAreaElement;
+      if (!isVisible(el)) return false;
+      const descriptor = [
+        textOf(el),
+        el.getAttribute('placeholder') || '',
+        el.getAttribute('aria-label') || '',
+        el.getAttribute('name') || '',
+        el.getAttribute('id') || '',
+        textOf(el.closest('section, aside, div, form')),
+      ].join(' ');
+      return /tag|label|标签|搜索标签|添加标签/i.test(descriptor);
+    }) as HTMLInputElement | HTMLTextAreaElement | undefined;
 
   return (async () => {
     const normalizedTag = normalize(tag);
@@ -2484,16 +3759,17 @@ function addRecruiterTagInPage(
 
     let panel = findPanel();
     if (!panel) {
-      clickFirst(['tag', 'add tag', 'label']);
+      clickFirst(['tag', 'add tag', 'label', '标签', '添加标签']);
       await sleep(900);
       panel = findPanel();
     }
-    if (!panel) {
+    const inlineInput = findTagInput(panel || document);
+    const workingRoot = panel || inlineInput?.closest('section, div, aside, form') || document;
+    if (!panel && !inlineInput) {
       return { error: 'No visible Recruiter tag chooser was found on the current page.' };
     }
 
-    const inputs = Array.from(panel.querySelectorAll('input, textarea')).filter((el) => isVisible(el));
-    const input = inputs[0] as HTMLInputElement | HTMLTextAreaElement | undefined;
+    const input = inlineInput || findTagInput(workingRoot);
     if (input) {
       input.focus();
       input.value = normalizedTag;
@@ -2503,14 +3779,15 @@ function addRecruiterTagInPage(
     }
 
     const lowerTag = normalizedTag.toLowerCase();
-    const options = Array.from(panel.querySelectorAll('label, li, button, [role="option"], [data-tag-id], input[type="checkbox"], input[type="radio"]'));
+    const options = Array.from(document.querySelectorAll('label, li, button, [role="option"], [data-tag-id], input[type="checkbox"], input[type="radio"], .artdeco-typeahead__result, .artdeco-typeahead__results-list li'));
     const option = options.find((el) => textOf(el).toLowerCase().includes(lowerTag)) as HTMLElement | undefined;
     if (option) {
       (option.closest('label, button, li, [role="option"]') as HTMLElement | null || option).click();
       await sleep(250);
     }
 
-    const confirmed = clickFirst(['save', 'add', 'done', 'apply', 'create'], panel);
+    const confirmed = clickFirst(['save', 'add', 'done', 'apply', 'create', '保存', '添加', '完成', '应用', '创建'], workingRoot)
+      || clickFirst(['save', 'add', 'done', 'apply', 'create', '保存', '添加', '完成', '应用', '创建']);
     if (!confirmed && !option) {
       return { error: `Tag "${normalizedTag}" was not visible and no confirm button was available.` };
     }
@@ -2553,6 +3830,10 @@ function addRecruiterNoteInPage(
       .filter((el) => isVisible(el) && terms.some(term => textOf(el).toLowerCase().includes(term)));
     const target = nodes[0] as HTMLElement | undefined;
     if (target) {
+      target.scrollIntoView?.({ block: 'center', inline: 'center' });
+      for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click']) {
+        target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+      }
       target.click();
       return true;
     }
@@ -2568,7 +3849,17 @@ function addRecruiterNoteInPage(
     ];
     for (const selector of selectors) {
       const nodes = Array.from(document.querySelectorAll(selector));
-      const target = nodes.find((el) => isVisible(el) && /note|notes|add note/i.test(textOf(el) || (el as HTMLElement).getAttribute?.('placeholder') || ''));
+      const target = nodes.find((el) => {
+        if (!isVisible(el)) return false;
+        const selfDescriptor = [
+          textOf(el),
+          (el as HTMLElement).getAttribute?.('placeholder') || '',
+          (el as HTMLElement).getAttribute?.('data-placeholder') || '',
+          (el as HTMLElement).getAttribute?.('aria-label') || '',
+          textOf(el.closest('section, aside, div')),
+        ].join(' ');
+        return /note|notes|add note|备注|输入备注文本|添加备注|添加有关|备注可见范围|reply|回复/i.test(selfDescriptor);
+      });
       if (target) return target as HTMLElement;
     }
     return null;
@@ -2580,7 +3871,7 @@ function addRecruiterNoteInPage(
 
     let composer = findComposer();
     if (!composer) {
-      clickFirst(['add note', 'note', 'notes']);
+      clickFirst(['add note', 'note', 'notes', '备注', '添加备注', '添加有关']);
       await sleep(900);
       composer = findComposer();
     }
@@ -2598,7 +3889,7 @@ function addRecruiterNoteInPage(
     composer.dispatchEvent(new Event('change', { bubbles: true }));
     await sleep(250);
 
-    const saved = clickFirst(['save note', 'save', 'done', 'add note']);
+    const saved = clickFirst(['save note', 'save', 'done', 'add note', '保存备注', '保存', '完成', '添加备注', '添加']);
     if (!saved) {
       return { error: 'Note editor opened, but no save button was found.' };
     }
@@ -2662,6 +3953,90 @@ export async function ensureLinkedinSession(page: IPage, targetUrl: string): Pro
     throw new AuthRequiredError('linkedin.com', 'LinkedIn requires an active signed-in browser session');
   }
   return surface;
+}
+
+export async function ensureLinkedinProfilePage(page: IPage, targetUrl: string): Promise<SurfaceDetectionResult> {
+  const surface = await ensureLinkedinSession(page, targetUrl);
+  const currentUrl = await page.getCurrentUrl?.().catch(() => null) || surface.currentUrl;
+  if (isLinkedinProfileUrl(currentUrl)) return surface;
+
+  await page.wait({ time: 1 });
+  const retriedUrl = await page.getCurrentUrl?.().catch(() => null) || currentUrl;
+  if (isLinkedinProfileUrl(retriedUrl)) return surface;
+
+  throw new CommandExecutionError(
+    'LinkedIn profile page did not open',
+    'Open the target candidate profile in Chrome and verify Recruiter can access it before retrying.',
+  );
+}
+
+export async function adoptLinkedinTab(
+  page: IPage,
+  targetUrl: string,
+  fallbackPatterns: string[] = [],
+): Promise<boolean> {
+  const pageWorkspace = String((page as any).workspace || 'default');
+  try {
+    const discovered = await sendCommand('tabs', { op: 'list', workspace: pageWorkspace });
+    const tabs = Array.isArray(discovered) ? discovered as BrowserTabMatch[] : [];
+    let preferred = chooseMatchingLinkedinTab(tabs, targetUrl, fallbackPatterns);
+
+    if (!preferred?.tabId) {
+      const externalMatches = await sendCommand('tabs', {
+        op: 'find',
+        urlContains: targetUrl,
+        activeOnly: false,
+      });
+      const externalTabs = Array.isArray(externalMatches) ? externalMatches as BrowserTabMatch[] : [];
+      preferred = chooseMatchingLinkedinTab(externalTabs, targetUrl, fallbackPatterns);
+    }
+
+    if (!preferred?.tabId) {
+      for (const pattern of fallbackPatterns) {
+        const externalMatches = await sendCommand('tabs', {
+          op: 'find',
+          urlContains: pattern,
+          activeOnly: false,
+        });
+        const externalTabs = Array.isArray(externalMatches) ? externalMatches as BrowserTabMatch[] : [];
+        preferred = chooseMatchingLinkedinTab(externalTabs, targetUrl, fallbackPatterns);
+        if (preferred?.tabId) break;
+      }
+    }
+
+    if (!preferred?.tabId) {
+      const sessions = await sendCommand('sessions');
+      const workspaces = Array.isArray(sessions)
+        ? (sessions as BrowserSessionInfo[])
+          .map((session) => String(session.workspace || ''))
+          .filter(Boolean)
+          .filter((name, index, names) => names.indexOf(name) === index)
+        : [];
+
+      for (const candidateWorkspace of workspaces) {
+        if (candidateWorkspace === pageWorkspace) continue;
+        const candidateTabsRaw = await sendCommand('tabs', { op: 'list', workspace: candidateWorkspace });
+        const candidateTabs = Array.isArray(candidateTabsRaw) ? candidateTabsRaw as BrowserTabMatch[] : [];
+        const candidate = chooseMatchingLinkedinTab(candidateTabs, targetUrl, fallbackPatterns);
+        if (candidate?.tabId) {
+          preferred = candidate;
+          break;
+        }
+      }
+    }
+
+    if (!preferred?.tabId) return false;
+
+    await sendCommand('tabs', {
+      op: 'adopt',
+      workspace: pageWorkspace,
+      tabId: preferred.tabId,
+    });
+    (page as any)._tabId = preferred.tabId;
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function trySeedRecruiterSearch(page: IPage, input: RecruiterPeopleSearchInput): Promise<void> {
@@ -2773,14 +4148,37 @@ export async function extractRecruiterProfile(
   candidateId: string,
   listSource = 'profile',
 ): Promise<RecruiterCandidateProfile> {
-  const profile = await page.evaluate(buildPageEval(extractRecruiterProfileInPage, candidateId, listSource));
-  if (!profile) {
-    throw new EmptyResultError(
-      'linkedin profile',
-      'No profile data was found on the current page. Open a recruiter candidate profile or public LinkedIn profile in Chrome and try again.',
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const profile = await page.evaluate(buildPageEval(extractRecruiterProfileInPage, candidateId, listSource));
+    const name = normalizeWhitespace(profile?.name);
+    const hasMeaningfulDetails = Boolean(
+      normalizeWhitespace(profile?.headline)
+      || normalizeWhitespace(profile?.about)
+      || normalizeWhitespace(profile?.current_title)
+      || normalizeWhitespace(profile?.work_history),
     );
+    if (profile && name && !/^(?:loading|正在加载)$/i.test(name) && hasMeaningfulDetails) {
+      return profile as RecruiterCandidateProfile;
+    }
+    if (attempt < 3) await page.wait({ time: 2 });
   }
-  return profile as RecruiterCandidateProfile;
+  throw new EmptyResultError(
+    'linkedin profile',
+    'No profile data was found on the current page. Open a recruiter candidate profile or public LinkedIn profile in Chrome and try again.',
+  );
+}
+
+export async function openRecruiterProfileFromCurrentPage(
+  page: IPage,
+  candidateId: string,
+  profileUrl: string,
+): Promise<boolean> {
+  const result = await page.evaluate(buildPageEval(openRecruiterProfileFromCurrentPageInPage, candidateId, profileUrl));
+  if (result?.opened) {
+    await page.wait({ time: 5 });
+    return true;
+  }
+  return false;
 }
 
 export async function collectRecruiterProjects(page: IPage): Promise<RecruiterProjectSummary[]> {
@@ -2829,7 +4227,63 @@ export async function collectRecruiterInboxThreads(
     );
   }
 
-  return sliced.map((thread, index) => ({
+  const enriched = await page.evaluate(buildPageEval(enrichRecruiterInboxThreadIdentitiesInPage, sliced));
+  const enrichedMap = new Map<string, RecruiterInboxThreadSummary>();
+  for (const item of Array.isArray(enriched) ? enriched as RecruiterInboxThreadSummary[] : []) {
+    const key = normalizeWhitespace(item.conversation_id || item.candidate_id || item.profile_url);
+    if (key) enrichedMap.set(key, item);
+  }
+  let normalized = sliced.map((thread) => {
+    const key = normalizeWhitespace(thread.conversation_id || thread.candidate_id || thread.profile_url);
+    const next = key ? enrichedMap.get(key) : undefined;
+    const canApplyNext = !next
+      || !normalizeWhitespace(thread.name)
+      || !normalizeWhitespace(next.name)
+      || namesLookCompatible(thread.name, next.name);
+    return {
+      ...thread,
+      ...(canApplyNext ? (next || {}) : {}),
+    };
+  }).map((thread) => {
+    const profileUrl = decodeLinkedinRedirect(thread.profile_url);
+    const candidateId = normalizeWhitespace(thread.candidate_id) || candidateIdFromArtifacts(profileUrl, '');
+    return {
+      ...thread,
+      candidate_id: candidateId,
+      profile_url: profileUrl,
+    };
+  });
+
+  for (let index = 0; index < normalized.length; index += 1) {
+    const thread = normalized[index];
+    if (thread.profile_url || thread.candidate_id || !thread.conversation_id) continue;
+    await page.goto(buildRecruiterInboxThreadUrl(thread.conversation_id), { settleMs: 1200 });
+    await page.wait({ time: 1 });
+    const identity = await page.evaluate(buildPageEval(
+      extractRecruiterInboxThreadIdentityInPage,
+      thread.conversation_id,
+      thread.list_source || listSource,
+    )) as RecruiterInboxThreadSummary | { error: string } | null;
+    if (!identity || (identity as { error?: string }).error) continue;
+    const next = identity as RecruiterInboxThreadSummary;
+    if (
+      normalizeWhitespace(thread.name)
+      && normalizeWhitespace(next.name)
+      && !namesLookCompatible(thread.name, next.name)
+    ) {
+      continue;
+    }
+    const profileUrl = decodeLinkedinRedirect(next.profile_url);
+    normalized[index] = {
+      ...thread,
+      ...next,
+      candidate_id: normalizeWhitespace(next.candidate_id) || candidateIdFromArtifacts(profileUrl, ''),
+      profile_url: profileUrl,
+      name: normalizeWhitespace(next.name) || thread.name,
+    };
+  }
+
+  return normalized.map((thread, index) => ({
     rank: start + index + 1,
     ...thread,
   }));
@@ -2879,7 +4333,7 @@ export async function replyRecruiterInboxConversation(
       'Open the target Recruiter conversation in Chrome and make sure the reply composer is visible.',
     );
   }
-  return result as RecruiterInboxReplyResult;
+  return normalizeRecruiterInboxReplyResult(result as RecruiterInboxReplyResult);
 }
 
 export async function sendRecruiterMessage(
@@ -2904,7 +4358,164 @@ export async function saveRecruiterCandidateToProject(
   projectId: string,
   listSource = 'profile',
 ): Promise<RecruiterSaveToProjectResult> {
-  const result = await page.evaluate(buildPageEval(saveCandidateToProjectInPage, projectId, candidateId, listSource));
+  const currentUrl = await page.getCurrentUrl?.().catch(() => null) || '';
+  const recruiterToken = extractRecruiterProfileToken(currentUrl);
+  if (recruiterToken && !/rightRail=saveToProject/i.test(currentUrl)) {
+    await page.goto(`https://www.linkedin.com/talent/profile/${encodeURIComponent(recruiterToken)}?rightRail=saveToProject`, {
+      settleMs: 1500,
+    });
+    await page.wait({ time: 1 });
+  }
+  let result = await page.evaluate(buildPageEval(saveCandidateToProjectInPageV2, projectId, candidateId, listSource));
+  if (result?.error && /project chooser/i.test(String(result.error)) && page.nativeType) {
+    const focused = await page.evaluate(`(() => {
+      const normalize = (value) => String(value ?? '').replace(/\\s+/g, ' ').trim();
+      const isVisible = (el) => {
+        if (!el) return false;
+        const rect = el.getBoundingClientRect?.();
+        const style = window.getComputedStyle(el);
+        return Boolean(rect && rect.width >= 0 && rect.height >= 0 && style.visibility !== 'hidden' && style.display !== 'none');
+      };
+      const textOf = (el) => normalize(
+        \`\${el?.innerText || ''} \${el?.getAttribute?.('aria-label') || ''} \${el?.getAttribute?.('title') || ''}\`,
+      );
+      const activate = (target) => {
+        if (!target) return false;
+        target.scrollIntoView?.({ block: 'center', inline: 'center' });
+        for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click']) {
+          target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+        }
+        target.click?.();
+        return true;
+      };
+      const panel = Array.from(document.querySelectorAll('[role="dialog"], .artdeco-modal, aside, section'))
+        .find((el) => isVisible(el) && /new project|project name|existing project|select existing project|新建项目|项目名称|选择现有项目|收藏/i.test(textOf(el)));
+      if (!panel) return false;
+      const existingToggle = Array.from(panel.querySelectorAll('label, button, span, div, [role="button"], [role="tab"], [role="radio"], input[type="radio"]'))
+        .find((node) => {
+          const el = node;
+          const label = \`\${textOf(el)} \${textOf(el.closest('label'))}\`;
+          return /select existing project|existing project|选择现有项目/i.test(label)
+            && isVisible((el.closest('label, button, [role="button"], [role="tab"], [role="radio"]') || el));
+        });
+      if (existingToggle) {
+        activate(existingToggle.closest('label, button, [role="button"], [role="tab"], [role="radio"]') || existingToggle);
+      }
+      const input = Array.from(panel.querySelectorAll('input, textarea'))
+        .find((node) => {
+          const el = node;
+          const descriptor = [
+            textOf(el),
+            el.getAttribute('placeholder') || '',
+            el.getAttribute('aria-label') || '',
+            el.getAttribute('name') || '',
+            el.getAttribute('id') || '',
+            textOf(el.closest('label')),
+            textOf(el.parentElement),
+          ].join(' ');
+          return isVisible(el) && /search|find|project|existing project|选择现有项目|项目|项目名称|save-to-projects-typeahead/i.test(descriptor);
+        });
+      if (!input) return false;
+      const prototype = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
+      input.focus();
+      descriptor?.set?.call(input, '');
+      if (!descriptor?.set) input.value = '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      return document.activeElement === input;
+    })()`);
+    if (focused) {
+      await page.nativeType(projectId);
+      await page.wait({ time: 1.2 });
+      const interactiveResult = await page.evaluate(`(async () => {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const normalize = (value) => String(value ?? '').replace(/\\s+/g, ' ').trim();
+        const normRef = normalize(${JSON.stringify(projectId)}).toLowerCase();
+        const isVisible = (el) => {
+          if (!el) return false;
+          const rect = el.getBoundingClientRect?.();
+          const style = window.getComputedStyle(el);
+          return Boolean(rect && rect.width >= 0 && rect.height >= 0 && style.visibility !== 'hidden' && style.display !== 'none');
+        };
+        const textOf = (el) => normalize(
+          \`\${el?.innerText || ''} \${el?.textContent || ''} \${el?.getAttribute?.('aria-label') || ''} \${el?.getAttribute?.('title') || ''}\`,
+        );
+        const activate = (target) => {
+          if (!target) return false;
+          target.scrollIntoView?.({ block: 'center', inline: 'center' });
+          for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click']) {
+            target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+          }
+          target.click?.();
+          return true;
+        };
+        const optionSelectors = [
+          'li.artdeco-typeahead__result',
+          '.artdeco-typeahead__result',
+          '.basic-typeahead__selectable',
+          '.basic-typeahead__result',
+          '[role="option"]',
+          '[role="listbox"] > *',
+          '[class*="typeahead"] li',
+          '[class*="typeahead"] [role="option"]',
+          '[id*="typeahead"] li',
+          '[id*="typeahead"] [role="option"]',
+          '[data-project-id]',
+          '[data-id]',
+          'label',
+          'li',
+          'a',
+          'button',
+          'div',
+          'span',
+        ];
+        const candidates = Array.from(document.querySelectorAll(optionSelectors.join(',')))
+          .filter((el) => isVisible(el))
+          .map((el) => {
+            const text = textOf(el);
+            const datasetBits = [
+              el.getAttribute?.('data-project-id') || '',
+              el.getAttribute?.('data-id') || '',
+              el.getAttribute?.('value') || '',
+              text,
+            ].join(' ').toLowerCase();
+            return { el, text, datasetBits };
+          })
+          .filter((item) => item.datasetBits && item.datasetBits.includes(normRef))
+          .filter((item) => item.text.length > 0 && item.text.length < 300);
+        const option = candidates[0];
+        if (!option) return null;
+        activate(option.el.closest('li, label, button, [role="option"], a, div, span') || option.el);
+        await sleep(400);
+        const confirmTerms = /保存|收藏/.test(document.body.innerText || '')
+          ? ['save', 'add', 'done', 'confirm', '收藏', '保存', '添加', '完成', '确认']
+          : ['save', 'add', 'done', 'confirm'];
+        const buttons = Array.from(document.querySelectorAll('button, a[role="button"], [role="button"], span[role="button"]'))
+          .filter((el) => isVisible(el));
+        const confirm = buttons.find((el) => confirmTerms.some((term) => textOf(el).toLowerCase().includes(term.toLowerCase())));
+        if (confirm) {
+          activate(confirm);
+          await sleep(800);
+        }
+        const profileUrl = normalize(
+          document.querySelector('a[href*="/in/"], a[href*="/talent/profile/"]')?.href || window.location.href,
+        );
+        return {
+          candidate_id: normalize(${JSON.stringify(candidateId)}),
+          project_id: normalize(${JSON.stringify(projectId)}),
+          project_name: option.text || normalize(${JSON.stringify(projectId)}),
+          profile_url: profileUrl,
+          status: 'saved',
+          detail: \`Saved candidate to project \${option.text || normalize(${JSON.stringify(projectId)})}\`,
+          list_source: normalize(${JSON.stringify(listSource)}),
+        };
+      })()`);
+      if (interactiveResult) {
+        result = interactiveResult;
+      }
+    }
+  }
   if (!result || result.error) {
     throw new CommandExecutionError(
       result?.error || 'Could not save the current candidate to a LinkedIn Recruiter project',
@@ -2950,16 +4561,26 @@ export const __test__ = {
   normalizeWhitespace,
   parseCsvArg,
   toYesNo,
+  looksLikeRecruiterNoteReplySurface,
+  looksLikeRecruiterReplyComposer,
   queriesLookCompatible,
+  namesLookCompatible,
   canonicalizeLinkedinUrl,
   decodeLinkedinRedirect,
   candidateIdFromProfileUrl,
   decodeCandidateId,
   candidateIdFromArtifacts,
+  normalizeRecruiterInboxReplyResult,
   resolveRecruiterProfileUrl,
+  isLinkedinProfileUrl,
   buildRecruiterProjectUrl,
+  buildRecruiterProjectMembersUrl,
+  buildRecruiterSavedSearchesUrl,
+  extractRecruiterProjectId,
+  extractRecruiterProfileToken,
   buildRecruiterInboxUrl,
   buildRecruiterInboxThreadUrl,
+  buildRecruiterProfileMessagesUrl,
   buildRecruiterSearchUrl,
   summarizeSignals,
   formatNetworkDistance,
@@ -2978,4 +4599,5 @@ export const __test__ = {
   exportRecruiterFollowUpQueue,
   applyVisibleFilters,
   listToMultiline,
+  describeRecruiterProjectChooserBlocker,
 };

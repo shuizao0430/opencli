@@ -45,7 +45,16 @@ describe('phase 2 target resolution', () => {
 
   it('falls back to recruiter profile urls for opaque candidate ids', () => {
     expect(resolveSaveTargetUrl('ACoAAA123XYZ', undefined)).toBe(
-      'https://www.linkedin.com/talent/profile/ACoAAA123XYZ',
+      'https://www.linkedin.com/talent/profile/ACoAAA123XYZ?rightRail=saveToProject',
     );
+  });
+
+  it('normalizes recruiter project-context profile urls to the save rail surface for save-to-project', () => {
+    expect(
+      resolveSaveTargetUrl(
+        'url:aHR0cHM6Ly93d3cubGlua2VkaW4uY29tL3RhbGVudC9wcm9maWxlL0FFTUFBQUpsMXhVQnd1WFpheHFtc2RvZnRSaENVM21uVDM4RlI3OD9wcm9qZWN0PTM3NjEyNDk0NiZ0cms9UFJPSkVDVF9QSVBFTElORQ',
+        undefined,
+      ),
+    ).toBe('https://www.linkedin.com/talent/profile/AEMAAAJl1xUBwuXZaxqmsdoftRhCU3mnT38FR78?rightRail=saveToProject');
   });
 });

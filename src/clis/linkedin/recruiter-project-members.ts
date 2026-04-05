@@ -1,14 +1,14 @@
 import { ArgumentError } from '../../errors.js';
 import { cli, Strategy } from '../../registry.js';
 import {
-  buildRecruiterProjectUrl,
+  buildRecruiterProjectMembersUrl,
   collectRecruiterPeople,
   ensureRecruiterSurface,
   type RecruiterPeopleSearchInput,
 } from './recruiter-utils.js';
 
 function buildProjectUrl(projectId: string): string {
-  return buildRecruiterProjectUrl(projectId);
+  return buildRecruiterProjectMembersUrl(projectId);
 }
 
 cli({

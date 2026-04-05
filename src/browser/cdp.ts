@@ -74,7 +74,7 @@ export class CDPBridge implements IBrowserFactory {
           await this.send('Page.enable');
           await this.send('Page.addScriptToEvaluateOnNewDocument', { source: generateStealthJs() });
         } catch {}
-        resolve(new CDPPage(this));
+        resolve(new CDPPage(this, opts?.workspace ?? 'default'));
       });
 
       ws.on('error', (err: Error) => {
@@ -165,7 +165,10 @@ export class CDPBridge implements IBrowserFactory {
 
 class CDPPage extends BasePage {
   private _pageEnabled = false;
-  constructor(private bridge: CDPBridge) {
+  constructor(
+    private bridge: CDPBridge,
+    readonly workspace: string = 'default',
+  ) {
     super();
   }
 

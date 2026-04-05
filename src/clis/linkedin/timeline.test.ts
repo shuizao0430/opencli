@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { getRegistry } from '../../registry.js';
 import './timeline.js';
 
-const { parseMetric, buildPostId, mergeTimelinePosts } = await import('./timeline.js').then(
+const { looksLikeLinkedinFeedUrl, parseMetric, buildPostId, mergeTimelinePosts } = await import('./timeline.js').then(
   (m) => (m as any).__test__,
 );
 
@@ -47,6 +47,18 @@ describe('parseMetric', () => {
     expect(parseMetric('')).toBe(0);
     expect(parseMetric(undefined)).toBe(0);
     expect(parseMetric(null)).toBe(0);
+  });
+});
+
+describe('looksLikeLinkedinFeedUrl', () => {
+  it('matches the canonical feed route', () => {
+    expect(looksLikeLinkedinFeedUrl('https://www.linkedin.com/feed/')).toBe(true);
+    expect(looksLikeLinkedinFeedUrl('https://www.linkedin.com/feed/?trk=homepage-basic_sign-in-submit')).toBe(true);
+  });
+
+  it('rejects non-feed linkedin pages', () => {
+    expect(looksLikeLinkedinFeedUrl('https://www.linkedin.com/jobs/')).toBe(false);
+    expect(looksLikeLinkedinFeedUrl('about:blank')).toBe(false);
   });
 });
 

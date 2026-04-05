@@ -3,6 +3,7 @@ import { cli, Strategy } from '../../registry.js';
 import {
   buildRecruiterInboxThreadUrl,
   buildRecruiterInboxUrl,
+  buildRecruiterProfileMessagesUrl,
   ensureRecruiterSurface,
   replyRecruiterInboxConversation,
 } from './recruiter-utils.js';
@@ -17,7 +18,9 @@ function resolveInboxReplyTarget(
 
   const normalizedCandidateId = String(candidateId ?? '').trim();
   const normalizedProfileUrl = String(profileUrl ?? '').trim();
-  if (normalizedCandidateId || normalizedProfileUrl) return buildRecruiterInboxUrl();
+  if (normalizedCandidateId || normalizedProfileUrl) {
+    return buildRecruiterProfileMessagesUrl(normalizedCandidateId, normalizedProfileUrl) || buildRecruiterInboxUrl();
+  }
 
   throw new ArgumentError('conversation-id, --candidate-id, or --profile-url is required');
 }
@@ -32,14 +35,15 @@ cli({
   browser: true,
   args: [
     { name: 'conversation-id', type: 'string', positional: true, help: 'Conversation ID from linkedin inbox-list' },
-    { name: 'text', type: 'string', positional: true, required: true, help: 'Reply text to send' },
+    { name: 'text', type: 'string', positional: true, help: 'Reply text to send' },
+    { name: 'reply-text', type: 'string', help: 'Reply text when targeting by --candidate-id or --profile-url without a positional conversation-id' },
     { name: 'candidate-id', type: 'string', help: 'Fallback candidate ID when matching a visible thread' },
     { name: 'profile-url', type: 'string', help: 'Fallback public or Recruiter profile URL when matching a visible thread' },
   ],
   columns: ['conversation_id', 'candidate_id', 'profile_url', 'status', 'detail', 'list_source'],
   func: async (page, kwargs) => {
     const conversationId = String(kwargs['conversation-id'] ?? '').trim();
-    const text = String(kwargs.text ?? '').trim();
+    const text = String(kwargs.text ?? kwargs['reply-text'] ?? '').trim();
     const candidateId = String(kwargs['candidate-id'] ?? '').trim();
     const profileUrl = String(kwargs['profile-url'] ?? '').trim();
     if (!text) throw new ArgumentError('text is required');

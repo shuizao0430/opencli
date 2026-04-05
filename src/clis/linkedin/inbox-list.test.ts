@@ -26,6 +26,6 @@ describe('linkedin inbox-list adapter', () => {
   });
 
   it('builds recruiter inbox url', () => {
-    expect(buildInboxUrl()).toBe('https://www.linkedin.com/talent/messages');
+    expect(buildInboxUrl()).toBe('https://www.linkedin.com/talent/inbox/0/main');
   });
 });
