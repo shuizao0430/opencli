@@ -1,5 +1,5 @@
 /**
- * HTTP client for communicating with the opencli daemon.
+ * HTTP client for communicating with the HunterTools daemon.
  *
  * Provides a typed send() function that posts a Command and returns a Result.
  */
@@ -8,8 +8,9 @@ import { DEFAULT_DAEMON_PORT } from '../constants.js';
 import type { BrowserSessionInfo } from '../types.js';
 import { sleep } from '../utils.js';
 import { isTransientBrowserError } from './errors.js';
+import { getCompatEnv } from '../env.js';
 
-const DAEMON_PORT = parseInt(process.env.OPENCLI_DAEMON_PORT ?? String(DEFAULT_DAEMON_PORT), 10);
+const DAEMON_PORT = parseInt(getCompatEnv('OPENCLI_DAEMON_PORT') ?? String(DEFAULT_DAEMON_PORT), 10);
 const DAEMON_URL = `http://127.0.0.1:${DAEMON_PORT}`;
 const OPENCLI_HEADERS = { 'X-OpenCLI': '1' };
 

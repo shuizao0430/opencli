@@ -2,6 +2,7 @@ import { BrowserBridge, CDPBridge } from './browser/index.js';
 import type { IPage } from './types.js';
 import { TimeoutError } from './errors.js';
 import { isElectronApp } from './electron-apps.js';
+import { getCompatEnv } from './env.js';
 
 /**
  * Returns the appropriate browser factory based on site type.
@@ -9,13 +10,13 @@ import { isElectronApp } from './electron-apps.js';
  * registered Electron apps. Otherwise falls back to BrowserBridge.
  */
 export function getBrowserFactory(site?: string): new () => IBrowserFactory {
-  if (process.env.OPENCLI_CDP_ENDPOINT?.trim()) return CDPBridge;
+  if (getCompatEnv('OPENCLI_CDP_ENDPOINT')?.trim()) return CDPBridge;
   if (site && isElectronApp(site)) return CDPBridge;
   return BrowserBridge;
 }
 
 function parseEnvTimeout(envVar: string, fallback: number): number {
-  const raw = process.env[envVar];
+  const raw = getCompatEnv(envVar);
   if (raw === undefined) return fallback;
   const parsed = parseInt(raw, 10);
   if (Number.isNaN(parsed) || parsed <= 0) {

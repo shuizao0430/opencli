@@ -187,7 +187,7 @@ export async function executeCommand(
             'Install the Browser Bridge:\n' +
             '  1. Download: https://github.com/jackwener/opencli/releases\n' +
             '  2. chrome://extensions → Developer Mode → Load unpacked\n' +
-            '  Then run: opencli doctor',
+            '  Then run: huntertools doctor',
           );
         }
       }

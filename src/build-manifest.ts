@@ -15,6 +15,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import yaml from 'js-yaml';
 import { getErrorMessage } from './errors.js';
 import { fullName, getRegistry, type CliCommand } from './registry.js';
+import { isActiveSite } from './product-profile.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLIS_DIR = path.resolve(__dirname, 'clis');
@@ -201,6 +202,7 @@ export async function buildManifest(): Promise<ManifestEntry[]> {
     for (const site of fs.readdirSync(CLIS_DIR)) {
       const siteDir = path.join(CLIS_DIR, site);
       if (!fs.statSync(siteDir).isDirectory()) continue;
+      if (!isActiveSite(site)) continue;
       for (const file of fs.readdirSync(siteDir)) {
         const filePath = path.join(siteDir, file);
         if (file.endsWith('.yaml') || file.endsWith('.yml')) {

@@ -6,9 +6,10 @@
  */
 
 import chalk from 'chalk';
+import { getCompatEnv } from './env.js';
 
 function isVerbose(): boolean {
-  return !!process.env.OPENCLI_VERBOSE;
+  return !!getCompatEnv('OPENCLI_VERBOSE');
 }
 
 function isDebug(): boolean {

@@ -600,7 +600,7 @@ export async function recordSession(opts: RecordOptions): Promise<RecordResult> 
 
   const workspace = `record:${site}`;
 
-  console.log(chalk.bold.cyan('\n  opencli record'));
+  console.log(chalk.bold.cyan('\n  huntertools record'));
   console.log(chalk.dim(`  Site: ${site}  URL: ${opts.url}`));
   console.log(chalk.dim(`  Timeout: ${timeoutMs / 1000}s  Poll: ${pollMs}ms`));
   console.log(chalk.dim('  Navigating…'));
@@ -734,7 +734,7 @@ function analyzeAndWrite(
   requests: RecordedRequest[],
   outDir?: string,
 ): RecordResult {
-  const targetDir = outDir ?? path.join('.opencli', 'record', site);
+  const targetDir = outDir ?? path.join('.huntertools', 'record', site);
   fs.mkdirSync(targetDir, { recursive: true });
 
   if (requests.length === 0) {
@@ -808,7 +808,7 @@ function analyzeAndWrite(
 
 export function renderRecordSummary(result: RecordResult): string {
   const lines = [
-    `\n  opencli record: ${result.candidateCount > 0 ? chalk.green('OK') : chalk.yellow('no candidates')}`,
+    `\n  huntertools record: ${result.candidateCount > 0 ? chalk.green('OK') : chalk.yellow('no candidates')}`,
     `  Site: ${result.site}`,
     `  Captured: ${result.requests.length} requests`,
     `  Candidates: ${result.candidateCount}`,

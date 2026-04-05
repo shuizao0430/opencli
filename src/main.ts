@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * opencli — Make any website your CLI. AI-powered.
+ * HunterToolsCLI — recruiter-first browser automation CLI.
  */
 
 // Ensure standard system paths are available for child processes.
@@ -16,13 +16,14 @@ if (process.platform !== 'win32') {
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { discoverClis, discoverPlugins, ensureUserCliCompatShims, USER_CLIS_DIR } from './discovery.js';
+import { discoverClis, discoverPlugins, ensureUserCliCompatShims, USER_CLIS_DIR, LEGACY_USER_CLIS_DIR } from './discovery.js';
 import { getCompletions } from './completion.js';
 import { runCli } from './cli.js';
 import { emitHook } from './hooks.js';
 import { installNodeNetwork } from './node-network.js';
 import { registerUpdateNoticeOnExit, checkForUpdateBackground } from './update-check.js';
 import { EXIT_CODES } from './errors.js';
+import { ENABLE_RECRUITING_ONLY_MODE } from './product-profile.js';
 
 installNodeNetwork();
 
@@ -30,11 +31,16 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const BUILTIN_CLIS = path.resolve(__dirname, 'clis');
 const USER_CLIS = USER_CLIS_DIR;
+const LEGACY_USER_CLIS = LEGACY_USER_CLIS_DIR;
 
 // Sequential: plugins must run after built-in discovery so they can override built-in commands.
 await ensureUserCliCompatShims();
-await discoverClis(BUILTIN_CLIS, USER_CLIS);
-await discoverPlugins();
+if (ENABLE_RECRUITING_ONLY_MODE) {
+  await discoverClis(BUILTIN_CLIS);
+} else {
+  await discoverClis(BUILTIN_CLIS, USER_CLIS, LEGACY_USER_CLIS);
+  await discoverPlugins();
+}
 
 // Register exit hook: notice appears after command output (same as npm/gh/yarn)
 registerUpdateNoticeOnExit();
@@ -42,7 +48,7 @@ registerUpdateNoticeOnExit();
 checkForUpdateBackground();
 
 // ── Fast-path: handle --get-completions before commander parses ─────────
-// Usage: opencli --get-completions --cursor <N> [word1 word2 ...]
+// Usage: huntertools --get-completions --cursor <N> [word1 word2 ...]
 const getCompIdx = process.argv.indexOf('--get-completions');
 if (getCompIdx !== -1) {
   const rest = process.argv.slice(getCompIdx + 1);

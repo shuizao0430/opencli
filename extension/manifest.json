@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "OpenCLI",
+  "name": "HunterTools Browser Bridge",
   "version": "1.5.5",
-  "description": "Browser automation bridge for the OpenCLI CLI tool. Executes commands in isolated Chrome windows via a local daemon.",
+  "description": "Browser automation bridge for HunterToolsCLI. Executes commands in isolated Chrome windows via a local daemon.",
   "permissions": [
     "debugger",
     "scripting",
@@ -25,7 +25,7 @@
     "128": "icons/icon-128.png"
   },
   "action": {
-    "default_title": "OpenCLI",
+    "default_title": "HunterToolsCLI",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon-16.png",
@@ -35,5 +35,5 @@
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'"
   },
-  "homepage_url": "https://github.com/jackwener/opencli"
+  "homepage_url": "https://github.com/shuizao0430/opencli"
 }

@@ -1,62 +1,45 @@
 # 快速开始
 
-> **让任何网站或 Electron 应用成为你的 CLI。**
-> 零风险 · 复用 Chrome 登录态 · AI 驱动发现 · 浏览器 + 桌面自动化
-
-OpenCLI 将**任何网站**或 **Electron 应用**变成命令行界面 — Bilibili、知乎、小红书、Twitter/X、Reddit、YouTube、Antigravity 等 — 基于浏览器会话复用和 AI 原生发现。
+HunterToolsCLI 现在是一个面向招聘工作的 CLI，重点服务 LinkedIn 与 LinkedIn Recruiter。
 
 ## 安装
 
 ```bash
-npm install -g @jackwener/opencli
+npm install -g huntertoolscli
 ```
 
-## 基本使用
+## 当前产品范围
+
+- LinkedIn 公共读取命令：`search`、`timeline`
+- LinkedIn Recruiter 招聘命令：搜索候选人、读取资料、发送消息、处理 inbox、构建 follow-up queue、导出结果
+- 为这些工作流保留的基础命令：`operate`、`doctor`、`daemon`、`completion`
+
+## 快速试跑
 
 ```bash
-opencli list                              # 查看所有命令
-opencli hackernews top --limit 5          # 公开 API，无需浏览器
-opencli bilibili hot --limit 5            # 浏览器命令
-opencli zhihu hot -f json                 # JSON 输出
+huntertools doctor
+huntertools list
+huntertools linkedin people-search "technical recruiter" --location "Singapore" --limit 5
+huntertools linkedin follow-up-queue --limit 5 --inbox-limit 10
 ```
 
-## 输出格式
+## 浏览器前置条件
 
-所有命令支持 `--format` / `-f`：
+- Chrome 正在运行
+- 你已经登录 `linkedin.com`
+- Recruiter 命令需要现成的 LinkedIn Recruiter 登录态
+- 已安装 Browser Bridge 扩展
+
+## 自动补全
 
 ```bash
-opencli bilibili hot -f table   # 默认：终端表格
-opencli bilibili hot -f json    # JSON
-opencli bilibili hot -f yaml    # YAML
-opencli bilibili hot -f md      # Markdown
-opencli bilibili hot -f csv     # CSV
+echo 'eval "$(huntertools completion zsh)"' >> ~/.zshrc
+echo 'eval "$(huntertools completion bash)"' >> ~/.bashrc
+echo 'huntertools completion fish | source' >> ~/.config/fish/config.fish
 ```
-
-## 终端自动补全
-
-OpenCLI 支持智能的 Tab 自动补全，加快命令输入：
-
-```bash
-# 把自动补全加入 shell 启动配置
-echo 'eval "$(opencli completion zsh)"' >> ~/.zshrc              # Zsh
-echo 'eval "$(opencli completion bash)"' >> ~/.bashrc            # Bash
-echo 'opencli completion fish | source' >> ~/.config/fish/config.fish  # Fish
-
-# 重启 shell 后，按 Tab 键补全：
-opencli [Tab]          # 补全站点名称（bilibili、zhihu、twitter...）
-opencli bilibili [Tab] # 补全命令（hot、search、me、download...）
-```
-
-补全功能包含：
-- 所有可用的站点和适配器
-- 内置命令（list、explore、validate...）
-- 命令别名
-- 新增适配器时的实时更新
 
 ## 下一步
 
-- [安装详情](/zh/guide/installation)
-- [Browser Bridge 设置](/zh/guide/browser-bridge)
-- [所有适配器](/zh/adapters/)
-- [开发者指南](/zh/developer/contributing)
-- [给新 Electron 应用生成 CLI](/zh/guide/electron-app-cli)
+- [安装说明](/zh/guide/installation)
+- [Browser Bridge 配置](/zh/guide/browser-bridge)
+- [LinkedIn 适配器说明](/adapters/browser/linkedin)

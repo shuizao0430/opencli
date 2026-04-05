@@ -2,36 +2,37 @@
 
 ## Requirements
 
-- **Node.js**: >= 20.0.0
-- **Chrome** running and logged into the target site (for browser commands)
+- Node.js >= 20.0.0
+- Chrome running with an active LinkedIn login
+- LinkedIn Recruiter access for Recruiter commands
 
-## Install via npm (Recommended)
+## Install via npm
 
 ```bash
-npm install -g @jackwener/opencli
+npm install -g huntertoolscli
 ```
 
 ## Install from Source
 
 ```bash
-git clone git@github.com:jackwener/opencli.git
-cd opencli
+git clone git@github.com:shuizao0430/opencli.git HunterToolsCLI
+cd HunterToolsCLI
 npm install
 npm run build
-npm link      # Link binary globally
-opencli list  # Now you can use it anywhere!
+npm link
+huntertools list
 ```
 
 ## Update
 
 ```bash
-npm install -g @jackwener/opencli@latest
+npm install -g huntertoolscli@latest
 ```
 
 ## Verify Installation
 
 ```bash
-opencli --version   # Check version
-opencli list        # List all commands
-opencli doctor      # Diagnose connectivity
+huntertools --version
+huntertools list
+huntertools doctor
 ```

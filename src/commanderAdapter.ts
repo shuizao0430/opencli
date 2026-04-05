@@ -31,6 +31,7 @@ import {
   CommandExecutionError,
 } from './errors.js';
 import { checkDaemonStatus } from './browser/discover.js';
+import { EXTENSION_NAME, ISSUES_URL, PRIMARY_CLI_NAME, RELEASES_URL, formatCompatCommandHint } from './branding.js';
 
 export function normalizeArgValue(argType: string | undefined, value: unknown, name: string): unknown {
   if (argType !== 'bool' && argType !== 'boolean') return value;
@@ -96,7 +97,10 @@ export function registerCommandToProgram(siteCmd: Command, cmd: CliCommand): voi
 
       const verbose = optionsRecord.verbose === true;
       let format = typeof optionsRecord.format === 'string' ? optionsRecord.format : 'table';
-      if (verbose) process.env.OPENCLI_VERBOSE = '1';
+      if (verbose) {
+        process.env.OPENCLI_VERBOSE = '1';
+        process.env.HUNTERTOOLS_VERBOSE = '1';
+      }
       if (cmd.deprecated) {
         const message = typeof cmd.deprecated === 'string' ? cmd.deprecated : `${fullName(cmd)} is deprecated.`;
         const replacement = cmd.replacedBy ? ` Use ${cmd.replacedBy} instead.` : '';
@@ -155,8 +159,6 @@ function resolveExitCode(err: unknown): number {
 
 // ── Error rendering ──────────────────────────────────────────────────────────
 
-const ISSUES_URL = 'https://github.com/jackwener/opencli/issues';
-
 /** Pattern-based classifier for untyped errors thrown by adapters. */
 function classifyGenericError(msg: string): 'auth' | 'http' | 'not-found' | 'other' {
   const m = msg.toLowerCase();
@@ -176,14 +178,14 @@ function renderBridgeStatus(running: boolean, extensionConnected: boolean): void
   console.error();
   if (!running) {
     console.error(chalk.yellow('  Run the command again — daemon should auto-start.'));
-    console.error(chalk.dim('  Still failing? Run: opencli doctor'));
+    console.error(chalk.dim(`  Still failing? Run: ${formatCompatCommandHint('doctor')}`));
   } else if (!extensionConnected) {
-    console.error(chalk.yellow('  Install the Browser Bridge extension to continue:'));
-    console.error(chalk.dim('    1. Download from github.com/jackwener/opencli/releases'));
+    console.error(chalk.yellow(`  Install the ${EXTENSION_NAME} extension to continue:`));
+    console.error(chalk.dim(`    1. Download from ${RELEASES_URL}`));
     console.error(chalk.dim('    2. chrome://extensions → Enable Developer Mode → Load unpacked'));
   } else {
     console.error(chalk.yellow('  Connection failed despite extension being active.'));
-    console.error(chalk.dim('  Try reloading the extension, or run: opencli doctor'));
+    console.error(chalk.dim(`  Try reloading the extension, or run: ${formatCompatCommandHint('doctor')}`));
   }
 }
 
@@ -217,7 +219,7 @@ async function renderError(err: unknown, cmdName: string, verbose: boolean): Pro
   if (err instanceof TimeoutError) {
     console.error(chalk.red(`⏱  ${err.message}`));
     console.error(chalk.yellow('→ Try again, or raise the limit:'));
-    console.error(chalk.dim(`    OPENCLI_BROWSER_COMMAND_TIMEOUT=60 ${cmdName}`));
+    console.error(chalk.dim(`    HUNTERTOOLS_BROWSER_COMMAND_TIMEOUT=60 ${cmdName.replace(/^opencli\b/, PRIMARY_CLI_NAME)}`));
     return;
   }
 

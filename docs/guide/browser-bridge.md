@@ -1,49 +1,52 @@
 # Browser Bridge Setup
 
-> **⚠️ Important**: Browser commands reuse your Chrome login session. You must be logged into the target website in Chrome before running commands.
+> Important: browser commands reuse your logged-in Chrome session. Sign in to LinkedIn and LinkedIn Recruiter in Chrome before running HunterToolsCLI commands.
 
-OpenCLI connects to your browser through a lightweight **Browser Bridge** Chrome Extension + micro-daemon (zero config, auto-start).
+HunterToolsCLI connects to Chrome through a lightweight Browser Bridge extension plus a local daemon. For the recruiter workflow, this is the default connection path.
 
-## Extension Installation
+## Install The Extension
 
-### Method 1: Download Pre-built Release (Recommended)
+### Option 1: Load The Local `extension/` Folder
 
-1. Go to the GitHub [Releases page](https://github.com/jackwener/opencli/releases) and download the latest `opencli-extension.zip`.
-2. Unzip the file and open `chrome://extensions`, enable **Developer mode** (top-right toggle).
-3. Click **Load unpacked** and select the unzipped folder.
+1. Open `chrome://extensions`
+2. Enable Developer mode
+3. Click `Load unpacked`
+4. Select the repository's `extension/` folder
 
-### Method 2: Load Unpacked Source (For Developers)
+### Option 2: Load A Release Build
 
-1. Open `chrome://extensions` and enable **Developer mode**.
-2. Click **Load unpacked** and select the `extension/` directory from the repository.
+1. Open the project's [Releases](https://github.com/shuizao0430/opencli/releases) page
+2. Download the latest extension archive
+3. Unzip it locally
+4. Load it from `chrome://extensions`
 
-## Verification
-
-That's it! The daemon auto-starts when you run any browser command. No tokens, no manual configuration.
+## Verify Connectivity
 
 ```bash
-opencli doctor            # Check extension + daemon connectivity
+huntertools doctor
 ```
+
+If the extension is connected, HunterToolsCLI can reuse your existing Chrome tabs and Recruiter sessions.
 
 ## How It Works
 
-```
-┌─────────────┐     WebSocket      ┌──────────────┐     Chrome API     ┌─────────┐
-│  opencli    │ ◄──────────────► │  micro-daemon │ ◄──────────────► │  Chrome  │
-│  (Node.js)  │    localhost:19825  │  (auto-start) │    Extension       │ Browser  │
-└─────────────┘                    └──────────────┘                    └─────────┘
+```text
+huntertools CLI <-> local daemon <-> Browser Bridge extension <-> Chrome tab
 ```
 
-The daemon manages the WebSocket connection between your CLI commands and the Chrome extension. The extension executes JavaScript in the context of web pages, with access to the logged-in session.
+The daemon auto-starts when a browser command needs it. The extension runs inside Chrome and executes the requested page interactions against your already logged-in session.
 
 ## Daemon Lifecycle
 
-The daemon auto-starts on first browser command and stays alive for **4 hours** by default. It exits only when both conditions are met: no CLI requests for the timeout period AND no Chrome extension connected.
-
 ```bash
-opencli daemon status    # Check daemon state (PID, uptime, extension, memory)
-opencli daemon stop      # Graceful shutdown
-opencli daemon restart   # Stop + restart
+huntertools daemon status
+huntertools daemon stop
+huntertools daemon restart
 ```
 
-Override the timeout via the `OPENCLI_DAEMON_TIMEOUT` environment variable (milliseconds). Set to `0` to keep the daemon alive indefinitely.
+The daemon stays alive for 4 hours by default and exits when it has been idle and no extension is connected.
+
+- Preferred env var: `HUNTERTOOLS_DAEMON_TIMEOUT`
+- Legacy env var still supported: `OPENCLI_DAEMON_TIMEOUT`
+- Value is in milliseconds
+- Set `0` to disable idle timeout

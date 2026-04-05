@@ -1,16 +1,17 @@
 {
-  "name": "@jackwener/opencli",
+  "name": "huntertoolscli",
   "version": "1.6.1",
   "publishConfig": {
     "access": "public"
   },
-  "description": "Make any website your CLI. AI-powered.",
+  "description": "Recruiter-first browser automation CLI for sourcing, outreach, and hiring operations.",
   "engines": {
     "node": ">=20.0.0"
   },
   "type": "module",
   "main": "dist/main.js",
   "bin": {
+    "huntertools": "dist/main.js",
     "opencli": "dist/main.js"
   },
   "exports": {
@@ -50,7 +51,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jackwener/opencli.git"
+    "url": "git+https://github.com/shuizao0430/opencli.git"
   },
   "dependencies": {
     "chalk": "^5.3.0",

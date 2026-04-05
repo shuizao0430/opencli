@@ -9,6 +9,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import yaml from 'js-yaml';
+import { LEGACY_RUNTIME_DIRNAME, PRIMARY_RUNTIME_DIRNAME } from './branding.js';
 
 export interface ElectronAppEntry {
   /** CDP debug port (unique per app) */
@@ -56,11 +57,16 @@ function ensureLoaded(): Record<string, ElectronAppEntry> {
 
   let userApps: Record<string, ElectronAppEntry> | undefined;
   try {
-    const yamlPath = path.join(os.homedir(), '.opencli', 'apps.yaml');
-    if (fs.existsSync(yamlPath)) {
+    for (const yamlPath of [
+      path.join(os.homedir(), LEGACY_RUNTIME_DIRNAME, 'apps.yaml'),
+      path.join(os.homedir(), PRIMARY_RUNTIME_DIRNAME, 'apps.yaml'),
+    ]) {
+      if (!fs.existsSync(yamlPath)) continue;
       const content = fs.readFileSync(yamlPath, 'utf-8');
       const parsed = yaml.load(content) as { apps?: Record<string, ElectronAppEntry> };
-      userApps = parsed?.apps;
+      if (parsed?.apps) {
+        userApps = { ...(userApps ?? {}), ...parsed.apps };
+      }
     }
   } catch {
     // Silently ignore malformed user config

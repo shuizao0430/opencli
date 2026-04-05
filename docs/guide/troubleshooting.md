@@ -1,61 +1,51 @@
 # Troubleshooting
 
-## Common Issues
+## Extension Not Connected
 
-### "Extension not connected"
+- Confirm the Browser Bridge extension is enabled in `chrome://extensions`
+- Run `huntertools doctor`
+- If needed, reload the extension and rerun the command
 
-- Ensure the opencli Browser Bridge extension is installed and **enabled** in `chrome://extensions`.
-- Run `opencli doctor` to diagnose connectivity.
+## Empty LinkedIn Or Recruiter Results
 
-### Empty data or 'Unauthorized' error
+- Make sure the relevant LinkedIn page is already open in Chrome
+- Refresh the tab and confirm you are still logged in
+- For Recruiter commands, verify you are on a Recruiter seat that exposes the relevant surface
 
-- Your login session in Chrome might have expired. Open a normal Chrome tab, navigate to the target site, and log in or refresh the page.
-- Some sites have geographic restrictions (e.g., Bilibili, Zhihu from outside China).
-
-### Node API errors
-
-- Make sure you are using **Node.js >= 20**. Some dependencies require modern Node APIs.
-- Run `node --version` to verify.
-
-### Daemon issues
+## Daemon Issues
 
 ```bash
-# Check daemon status (PID, uptime, extension connection, memory)
-opencli daemon status
-
-# View extension logs
-curl localhost:19825/logs
-
-# Stop or restart the daemon
-opencli daemon stop
-opencli daemon restart
-
-# Full diagnostics
-opencli doctor
+huntertools daemon status
+huntertools daemon stop
+huntertools daemon restart
+huntertools doctor
 ```
 
-> The daemon auto-exits after 4 hours of inactivity (no CLI requests and no extension connection). Override with `OPENCLI_DAEMON_TIMEOUT` (milliseconds, `0` = never timeout).
+- Preferred timeout env var: `HUNTERTOOLS_DAEMON_TIMEOUT`
+- Legacy timeout env var still supported: `OPENCLI_DAEMON_TIMEOUT`
 
-### Desktop adapter connection issues
+## Remote Chrome / CDP Issues
 
-For Electron/CDP-based adapters (Cursor, Codex, etc.):
-
-1. Make sure the app is launched with `--remote-debugging-port=XXXX`
-2. Verify the endpoint is set: `echo $OPENCLI_CDP_ENDPOINT`
-3. Test the endpoint: `curl http://127.0.0.1:XXXX/json/version`
-
-### Build errors
+If you are using a CDP endpoint instead of the extension:
 
 ```bash
-# Clean rebuild
-rm -rf dist/
+echo $HUNTERTOOLS_CDP_ENDPOINT
+huntertools doctor
+```
+
+- Preferred env var: `HUNTERTOOLS_CDP_ENDPOINT`
+- Legacy env var still supported: `OPENCLI_CDP_ENDPOINT`
+
+## Build Issues
+
+```bash
 npm run build
-
-# Type check
-npx tsc --noEmit
+npm run docs:build
 ```
+
+If docs build fails with `spawn EPERM`, rerun it in an environment that allows VitePress to spawn its esbuild subprocess.
 
 ## Getting Help
 
-- [GitHub Issues](https://github.com/jackwener/opencli/issues) — Bug reports and feature requests
-- Run `opencli doctor` for comprehensive diagnostics
+- [GitHub Issues](https://github.com/shuizao0430/opencli/issues)
+- `huntertools doctor`

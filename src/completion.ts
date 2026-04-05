@@ -1,5 +1,5 @@
 /**
- * Shell tab-completion support for opencli.
+ * Shell tab-completion support for HunterToolsCLI.
  *
  * Provides:
  *  - Shell script generators for bash, zsh, and fish
@@ -8,30 +8,20 @@
 
 import { getRegistry } from './registry.js';
 import { CliError } from './errors.js';
+import { ACTIVE_BUILTIN_COMMANDS } from './product-profile.js';
+import { PRIMARY_CLI_NAME } from './branding.js';
 
 // ── Dynamic completion logic ───────────────────────────────────────────────
 
 /**
  * Built-in (non-dynamic) top-level commands.
  */
-const BUILTIN_COMMANDS = [
-  'list',
-  'validate',
-  'verify',
-  'explore',
-  'probe',        // alias for explore
-  'synthesize',
-  'generate',
-  'cascade',
-  'doctor',
-  'setup',
-  'completion',
-];
+const BUILTIN_COMMANDS: string[] = [...ACTIVE_BUILTIN_COMMANDS];
 
 /**
  * Return completion candidates given the current command-line words and cursor index.
  *
- * @param words  - The argv after 'opencli' (words[0] is the first arg, e.g. site name)
+ * @param words  - The argv after the CLI binary (words[0] is the first arg, e.g. site name)
  * @param cursor - 1-based position of the word being completed (1 = first arg)
  */
 export function getCompletions(words: string[], cursor: number): string[] {
@@ -70,42 +60,42 @@ export function getCompletions(words: string[], cursor: number): string[] {
 // ── Shell script generators ────────────────────────────────────────────────
 
 export function bashCompletionScript(): string {
-  return `# Bash completion for opencli
-# Add to ~/.bashrc:  eval "$(opencli completion bash)"
-_opencli_completions() {
+  return `# Bash completion for ${PRIMARY_CLI_NAME}
+# Add to ~/.bashrc:  eval "$(${PRIMARY_CLI_NAME} completion bash)"
+_huntertools_completions() {
   local cur words cword
   _get_comp_words_by_ref -n : cur words cword
 
   local completions
-  completions=$(opencli --get-completions --cursor "$cword" "\${words[@]:1}" 2>/dev/null)
+  completions=$(${PRIMARY_CLI_NAME} --get-completions --cursor "$cword" "\${words[@]:1}" 2>/dev/null)
 
   COMPREPLY=( $(compgen -W "$completions" -- "$cur") )
   __ltrim_colon_completions "$cur"
 }
-complete -F _opencli_completions opencli
+complete -F _huntertools_completions ${PRIMARY_CLI_NAME}
 `;
 }
 
 export function zshCompletionScript(): string {
-  return `# Zsh completion for opencli
-# Add to ~/.zshrc:  eval "$(opencli completion zsh)"
-_opencli() {
+  return `# Zsh completion for ${PRIMARY_CLI_NAME}
+# Add to ~/.zshrc:  eval "$(${PRIMARY_CLI_NAME} completion zsh)"
+_huntertools() {
   local -a completions
   local cword=$((CURRENT - 1))
-  completions=(\${(f)"$(opencli --get-completions --cursor "$cword" "\${words[@]:1}" 2>/dev/null)"})
+  completions=(\${(f)"$(${PRIMARY_CLI_NAME} --get-completions --cursor "$cword" "\${words[@]:1}" 2>/dev/null)"})
   compadd -a completions
 }
-compdef _opencli opencli
+compdef _huntertools ${PRIMARY_CLI_NAME}
 `;
 }
 
 export function fishCompletionScript(): string {
-  return `# Fish completion for opencli
-# Add to ~/.config/fish/config.fish:  opencli completion fish | source
-complete -c opencli -f -a '(
+  return `# Fish completion for ${PRIMARY_CLI_NAME}
+# Add to ~/.config/fish/config.fish:  ${PRIMARY_CLI_NAME} completion fish | source
+complete -c ${PRIMARY_CLI_NAME} -f -a '(
   set -l tokens (commandline -cop)
   set -l cursor (count (commandline -cop))
-  opencli --get-completions --cursor $cursor $tokens[2..] 2>/dev/null
+  ${PRIMARY_CLI_NAME} --get-completions --cursor $cursor $tokens[2..] 2>/dev/null
 )'
 `;
 }

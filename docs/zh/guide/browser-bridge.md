@@ -1,36 +1,52 @@
-# Browser Bridge 设置
+# Browser Bridge 配置
 
-> **⚠️ 重要**: 浏览器命令复用你的 Chrome 登录会话。运行命令前必须在 Chrome 中登录目标网站。
+> 重要：浏览器命令会复用你当前 Chrome 的登录态。运行 HunterToolsCLI 前，请先在 Chrome 中登录 LinkedIn 和 LinkedIn Recruiter。
 
-OpenCLI 通过轻量级 **Browser Bridge** Chrome 扩展 + 微守护进程连接浏览器（零配置，自动启动）。
+HunterToolsCLI 默认通过 Browser Bridge 扩展和本地 daemon 连接 Chrome。这也是当前招聘工作流的标准接入方式。
 
-## 扩展安装
+## 安装扩展
 
-### 方法 1：下载预构建版本（推荐）
+### 方式 1：直接加载仓库里的 `extension/`
 
-1. 前往 GitHub [Releases 页面](https://github.com/jackwener/opencli/releases) 下载最新的 `opencli-extension.zip`。
-2. 解压后打开 `chrome://extensions`，启用**开发者模式**。
-3. 点击**加载已解压的扩展程序**，选择解压后的文件夹。
+1. 打开 `chrome://extensions`
+2. 打开右上角开发者模式
+3. 点击“加载已解压的扩展程序”
+4. 选择仓库中的 `extension/` 目录
 
-### 方法 2：加载源码（开发者）
+### 方式 2：加载发布包
 
-1. 打开 `chrome://extensions`，启用**开发者模式**。
-2. 点击**加载已解压的扩展程序**，选择仓库中的 `extension/` 目录。
+1. 打开项目的 [Releases](https://github.com/shuizao0430/opencli/releases) 页面
+2. 下载最新扩展压缩包
+3. 解压到本地
+4. 在 `chrome://extensions` 中加载
 
-## 验证
+## 连通性验证
 
 ```bash
-opencli doctor            # 检查扩展 + 守护进程连接
+huntertools doctor
 ```
+
+只要扩展连上，HunterToolsCLI 就可以复用你已经打开的 Chrome 标签页和 Recruiter 会话。
+
+## 工作方式
+
+```text
+huntertools CLI <-> 本地 daemon <-> Browser Bridge 扩展 <-> Chrome 标签页
+```
+
+当浏览器命令首次运行时，daemon 会自动拉起。扩展在 Chrome 内执行页面操作，因此可以直接使用你现有的登录态。
 
 ## Daemon 生命周期
 
-Daemon 在首次运行浏览器命令时自动启动，默认保持 **4 小时**。仅当 CLI 空闲超时**且** Chrome 扩展未连接时才会退出。
-
 ```bash
-opencli daemon status    # 查看 daemon 状态（PID、运行时长、扩展连接、内存）
-opencli daemon stop      # 优雅关停
-opencli daemon restart   # 重启
+huntertools daemon status
+huntertools daemon stop
+huntertools daemon restart
 ```
 
-通过 `OPENCLI_DAEMON_TIMEOUT` 环境变量覆盖超时时间（毫秒）。设为 `0` 则永不超时。
+默认空闲 4 小时后自动退出；如果没有 CLI 请求且扩展也未连接，就会结束。
+
+- 首选环境变量：`HUNTERTOOLS_DAEMON_TIMEOUT`
+- 兼容旧变量：`OPENCLI_DAEMON_TIMEOUT`
+- 单位为毫秒
+- 设为 `0` 表示永不超时

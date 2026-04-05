@@ -1,5 +1,5 @@
 /**
- * opencli micro-daemon — HTTP + WebSocket bridge between CLI and Chrome Extension.
+ * HunterTools micro-daemon — HTTP + WebSocket bridge between CLI and Chrome Extension.
  *
  * Architecture:
  *   CLI → HTTP POST /command → daemon → WebSocket → Extension
@@ -14,8 +14,8 @@
  *   5. WebSocket verifyClient — reject upgrade before connection is established
  *
  * Lifecycle:
- *   - Auto-spawned by opencli on first browser command
- *   - Auto-exits after idle timeout (default 4h, configurable via OPENCLI_DAEMON_TIMEOUT)
+ *   - Auto-spawned by huntertools on first browser command
+ *   - Auto-exits after idle timeout (default 4h, configurable via HUNTERTOOLS_DAEMON_TIMEOUT)
  *   - Listens on localhost:19825
  */
 
@@ -24,9 +24,10 @@ import { WebSocketServer, WebSocket, type RawData } from 'ws';
 import { DEFAULT_DAEMON_PORT, DEFAULT_DAEMON_IDLE_TIMEOUT } from './constants.js';
 import { EXIT_CODES } from './errors.js';
 import { IdleManager } from './idle-manager.js';
+import { getCompatEnv } from './env.js';
 
-const PORT = parseInt(process.env.OPENCLI_DAEMON_PORT ?? String(DEFAULT_DAEMON_PORT), 10);
-const IDLE_TIMEOUT = Number(process.env.OPENCLI_DAEMON_TIMEOUT ?? DEFAULT_DAEMON_IDLE_TIMEOUT);
+const PORT = parseInt(getCompatEnv('OPENCLI_DAEMON_PORT') ?? String(DEFAULT_DAEMON_PORT), 10);
+const IDLE_TIMEOUT = Number(getCompatEnv('OPENCLI_DAEMON_TIMEOUT') ?? DEFAULT_DAEMON_IDLE_TIMEOUT);
 
 // ─── State ───────────────────────────────────────────────────────────
 
@@ -172,7 +173,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       }
 
       if (!extensionWs || extensionWs.readyState !== WebSocket.OPEN) {
-        jsonResponse(res, 503, { id: body.id, ok: false, error: 'Extension not connected. Please install the opencli Browser Bridge extension.' });
+        jsonResponse(res, 503, { id: body.id, ok: false, error: 'Extension not connected. Please install the HunterTools Browser Bridge extension.' });
         return;
       }
 

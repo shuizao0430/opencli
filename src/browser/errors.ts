@@ -37,7 +37,7 @@ export function formatBrowserConnectError(kind: ConnectFailureKind, detail?: str
   switch (kind) {
     case 'daemon-not-running':
       return new BrowserConnectError(
-        'Cannot connect to opencli daemon.' + (detail ? `\n\n${detail}` : ''),
+        'Cannot connect to HunterTools daemon.' + (detail ? `\n\n${detail}` : ''),
         `The daemon should auto-start. If it keeps failing, make sure port ${DEFAULT_DAEMON_PORT} is available.`,
         kind,
       );

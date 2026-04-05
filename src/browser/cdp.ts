@@ -19,6 +19,7 @@ import { waitForDomStableJs } from './dom-helpers.js';
 import { isRecord, saveBase64ToFile } from '../utils.js';
 import { getAllElectronApps } from '../electron-apps.js';
 import { BasePage } from './base-page.js';
+import { getCompatEnv } from '../env.js';
 
 export interface CDPTarget {
   type?: string;
@@ -49,8 +50,10 @@ export class CDPBridge implements IBrowserFactory {
   async connect(opts?: { timeout?: number; workspace?: string; cdpEndpoint?: string }): Promise<IPage> {
     if (this._ws) throw new Error('CDPBridge is already connected. Call close() before reconnecting.');
 
-    const endpoint = opts?.cdpEndpoint ?? process.env.OPENCLI_CDP_ENDPOINT;
-    if (!endpoint) throw new Error('CDP endpoint not provided (pass cdpEndpoint or set OPENCLI_CDP_ENDPOINT)');
+    const endpoint = opts?.cdpEndpoint ?? getCompatEnv('OPENCLI_CDP_ENDPOINT');
+    if (!endpoint) {
+      throw new Error('CDP endpoint not provided (pass cdpEndpoint or set HUNTERTOOLS_CDP_ENDPOINT)');
+    }
 
     let wsUrl = endpoint;
     if (endpoint.startsWith('http')) {
@@ -254,7 +257,7 @@ function matchesCookieDomain(cookieDomain: string, targetDomain: string): boolea
 }
 
 function selectCDPTarget(targets: CDPTarget[]): CDPTarget | undefined {
-  const preferredPattern = compilePreferredPattern(process.env.OPENCLI_CDP_TARGET);
+  const preferredPattern = compilePreferredPattern(getCompatEnv('OPENCLI_CDP_TARGET'));
 
   const ranked = targets
     .map((target, index) => ({ target, index, score: scoreCDPTarget(target, preferredPattern) }))

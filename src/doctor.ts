@@ -1,5 +1,5 @@
 /**
- * opencli doctor — diagnose browser connectivity.
+ * HunterToolsCLI doctor — diagnose browser connectivity.
  *
  * Simplified for the daemon-based architecture.
  */
@@ -11,6 +11,7 @@ import { BrowserBridge } from './browser/index.js';
 import { listSessions } from './browser/daemon-client.js';
 import { getErrorMessage } from './errors.js';
 import { getRuntimeLabel } from './runtime-detect.js';
+import { EXTENSION_NAME, PRODUCT_NAME, PRIMARY_CLI_NAME, RELEASES_URL } from './branding.js';
 
 export type DoctorOptions = {
   yes?: boolean;
@@ -80,13 +81,13 @@ export async function runBrowserDoctor(opts: DoctorOptions = {}): Promise<Doctor
 
   const issues: string[] = [];
   if (!status.running) {
-    issues.push('Daemon is not running. It should start automatically when you run an opencli browser command.');
+    issues.push(`Daemon is not running. It should start automatically when you run a ${PRIMARY_CLI_NAME} browser command.`);
   }
   if (status.running && !status.extensionConnected) {
     issues.push(
       'Daemon is running but the Chrome extension is not connected.\n' +
-      'Please install the opencli Browser Bridge extension:\n' +
-      '  1. Download from https://github.com/jackwener/opencli/releases\n' +
+      `Please install the ${EXTENSION_NAME} extension:\n` +
+      `  1. Download from ${RELEASES_URL}\n` +
       '  2. Open chrome://extensions/ → Enable Developer Mode\n' +
       '  3. Click "Load unpacked" → select the extension folder',
     );
@@ -100,7 +101,7 @@ export async function runBrowserDoctor(opts: DoctorOptions = {}): Promise<Doctor
     if (extMajor !== cliMajor) {
       issues.push(
         `Extension major version mismatch: extension v${status.extensionVersion} ≠ CLI v${opts.cliVersion}\n` +
-        '  Download the latest extension from: https://github.com/jackwener/opencli/releases',
+        `  Download the latest extension from: ${RELEASES_URL}`,
       );
     }
   }
@@ -117,7 +118,7 @@ export async function runBrowserDoctor(opts: DoctorOptions = {}): Promise<Doctor
 }
 
 export function renderBrowserDoctorReport(report: DoctorReport): string {
-  const lines = [chalk.bold(`opencli v${report.cliVersion ?? 'unknown'} doctor`) + chalk.dim(` (${getRuntimeLabel()})`), ''];
+  const lines = [chalk.bold(`${PRODUCT_NAME} v${report.cliVersion ?? 'unknown'} doctor`) + chalk.dim(` (${getRuntimeLabel()})`), ''];
 
   // Daemon status
   const daemonIcon = report.daemonRunning ? chalk.green('[OK]') : chalk.red('[MISSING]');

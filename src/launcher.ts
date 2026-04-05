@@ -123,7 +123,7 @@ export async function resolveElectronEndpoint(site: string): Promise<string> {
   if (!app) {
     throw new CommandExecutionError(
       `No Electron app registered for site "${site}"`,
-      'Register the app in ~/.opencli/apps.yaml or check the site name.',
+      'Register the app in ~/.huntertools/apps.yaml (legacy ~/.opencli/apps.yaml also works) or check the site name.',
     );
   }
 
@@ -161,7 +161,7 @@ export async function resolveElectronEndpoint(site: string): Promise<string> {
   if (!appPath) {
     throw new CommandExecutionError(
       `Could not find ${label} on this machine.`,
-      `Install ${label} or register a custom path in ~/.opencli/apps.yaml`,
+      `Install ${label} or register a custom path in ~/.huntertools/apps.yaml`,
     );
   }
 

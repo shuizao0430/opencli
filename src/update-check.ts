@@ -14,11 +14,14 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import chalk from 'chalk';
 import { PKG_VERSION } from './version.js';
+import { PRIMARY_PACKAGE_NAME, LEGACY_PACKAGE_NAME, PRIMARY_CLI_NAME, PRIMARY_RUNTIME_DIRNAME, LEGACY_RUNTIME_DIRNAME } from './branding.js';
 
-const CACHE_DIR = path.join(os.homedir(), '.opencli');
+const PRIMARY_CACHE_DIR = path.join(os.homedir(), PRIMARY_RUNTIME_DIRNAME);
+const LEGACY_CACHE_DIR = path.join(os.homedir(), LEGACY_RUNTIME_DIRNAME);
+const CACHE_DIR = PRIMARY_CACHE_DIR;
 const CACHE_FILE = path.join(CACHE_DIR, 'update-check.json');
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24h
-const NPM_REGISTRY_URL = 'https://registry.npmjs.org/@jackwener/opencli/latest';
+const NPM_REGISTRY_URL = `https://registry.npmjs.org/${PRIMARY_PACKAGE_NAME}/latest`;
 
 interface UpdateCache {
   lastCheck: number;
@@ -27,11 +30,17 @@ interface UpdateCache {
 
 // Read cache once at module load — shared by both exported functions
 const _cache: UpdateCache | null = (() => {
-  try {
-    return JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8')) as UpdateCache;
-  } catch {
-    return null;
+  for (const candidate of [
+    path.join(PRIMARY_CACHE_DIR, 'update-check.json'),
+    path.join(LEGACY_CACHE_DIR, 'update-check.json'),
+  ]) {
+    try {
+      return JSON.parse(fs.readFileSync(candidate, 'utf-8')) as UpdateCache;
+    } catch {
+      // Try next cache file
+    }
   }
+  return null;
 })();
 
 function writeCache(latestVersion: string): void {
@@ -77,7 +86,7 @@ export function registerUpdateNoticeOnExit(): void {
     try {
       process.stderr.write(
         chalk.yellow(`\n  Update available: v${PKG_VERSION} → v${_cache.latestVersion}\n`) +
-        chalk.dim(`  Run: npm install -g @jackwener/opencli\n\n`),
+        chalk.dim(`  Run: npm install -g ${PRIMARY_PACKAGE_NAME} (legacy package: ${LEGACY_PACKAGE_NAME})\n\n`),
       );
     } catch {
       // Ignore broken pipe (stderr closed before process exits)
@@ -99,7 +108,7 @@ export function checkForUpdateBackground(): void {
       const timer = setTimeout(() => controller.abort(), 3000);
       const res = await fetch(NPM_REGISTRY_URL, {
         signal: controller.signal,
-        headers: { 'User-Agent': `opencli/${PKG_VERSION}` },
+        headers: { 'User-Agent': `${PRIMARY_CLI_NAME}/${PKG_VERSION}` },
       });
       clearTimeout(timer);
       if (!res.ok) return;

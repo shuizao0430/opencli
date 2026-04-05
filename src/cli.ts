@@ -17,6 +17,8 @@ import { loadExternalClis, executeExternalCli, installExternalCli, registerExter
 import { registerAllCommands } from './commanderAdapter.js';
 import { EXIT_CODES, getErrorMessage } from './errors.js';
 import { daemonStatus, daemonStop, daemonRestart } from './commands/daemon.js';
+import { getInvokedCliName, PRIMARY_CLI_NAME, LEGACY_CLI_NAME, PRODUCT_NAME, formatCompatCommandHint } from './branding.js';
+import { ENABLE_RECRUITING_ONLY_MODE } from './product-profile.js';
 
 /** Create a browser page for operate commands. Uses 'operate' workspace for session persistence. */
 async function getOperatePage(): Promise<import('./types.js').IPage> {
@@ -27,11 +29,12 @@ async function getOperatePage(): Promise<import('./types.js').IPage> {
 
 export function runCli(BUILTIN_CLIS: string, USER_CLIS: string): void {
   const program = new Command();
+  const cliName = getInvokedCliName();
   // enablePositionalOptions: prevents parent from consuming flags meant for subcommands;
   // prerequisite for passThroughOptions to forward --help/--version to external binaries
   program
-    .name('opencli')
-    .description('Make any website your CLI. Zero setup. AI-powered.')
+    .name(cliName)
+    .description(`${PRODUCT_NAME} — recruiter-first browser automation CLI. Primary command: ${PRIMARY_CLI_NAME}; legacy alias: ${LEGACY_CLI_NAME}.`)
     .version(PKG_VERSION)
     .enablePositionalOptions();
 
@@ -65,8 +68,8 @@ export function runCli(BUILTIN_CLIS: string, USER_CLIS: string): void {
           fmt,
           columns: ['command', 'site', 'name', 'aliases', 'description', 'strategy', 'browser', 'args',
                      ...(isStructured ? ['columns', 'domain'] : [])],
-          title: 'opencli/list',
-          source: 'opencli list',
+          title: `${PRIMARY_CLI_NAME}/list`,
+          source: `${PRIMARY_CLI_NAME} list`,
         });
         return;
       }
@@ -80,7 +83,7 @@ export function runCli(BUILTIN_CLIS: string, USER_CLIS: string): void {
       }
 
       console.log();
-      console.log(chalk.bold('  opencli') + chalk.dim(' — available commands'));
+      console.log(chalk.bold(`  ${PRIMARY_CLI_NAME}`) + chalk.dim(` — available commands (legacy alias: ${LEGACY_CLI_NAME})`));
       console.log();
       for (const [site, cmds] of sites) {
         console.log(chalk.bold.cyan(`  ${site}`));
@@ -95,7 +98,7 @@ export function runCli(BUILTIN_CLIS: string, USER_CLIS: string): void {
         console.log();
       }
 
-      const externalClis = loadExternalClis();
+      const externalClis = ENABLE_RECRUITING_ONLY_MODE ? [] : loadExternalClis();
       if (externalClis.length > 0) {
         console.log(chalk.bold.cyan('  external CLIs'));
         for (const ext of externalClis) {
@@ -112,129 +115,133 @@ export function runCli(BUILTIN_CLIS: string, USER_CLIS: string): void {
 
   // ── Built-in: validate / verify ───────────────────────────────────────────
 
-  program
-    .command('validate')
-    .description('Validate CLI definitions')
-    .argument('[target]', 'site or site/name')
-    .action(async (target) => {
-      const { validateClisWithTarget, renderValidationReport } = await import('./validate.js');
-      console.log(renderValidationReport(validateClisWithTarget([BUILTIN_CLIS, USER_CLIS], target)));
-    });
+  if (!ENABLE_RECRUITING_ONLY_MODE) {
+    program
+      .command('validate')
+      .description('Validate CLI definitions')
+      .argument('[target]', 'site or site/name')
+      .action(async (target) => {
+        const { validateClisWithTarget, renderValidationReport } = await import('./validate.js');
+        console.log(renderValidationReport(validateClisWithTarget([BUILTIN_CLIS, USER_CLIS], target)));
+      });
 
-  program
-    .command('verify')
-    .description('Validate + smoke test')
-    .argument('[target]')
-    .option('--smoke', 'Run smoke tests', false)
-    .action(async (target, opts) => {
-      const { verifyClis, renderVerifyReport } = await import('./verify.js');
-      const r = await verifyClis({ builtinClis: BUILTIN_CLIS, userClis: USER_CLIS, target, smoke: opts.smoke });
-      console.log(renderVerifyReport(r));
-      process.exitCode = r.ok ? EXIT_CODES.SUCCESS : EXIT_CODES.GENERIC_ERROR;
-    });
+    program
+      .command('verify')
+      .description('Validate + smoke test')
+      .argument('[target]')
+      .option('--smoke', 'Run smoke tests', false)
+      .action(async (target, opts) => {
+        const { verifyClis, renderVerifyReport } = await import('./verify.js');
+        const r = await verifyClis({ builtinClis: BUILTIN_CLIS, userClis: USER_CLIS, target, smoke: opts.smoke });
+        console.log(renderVerifyReport(r));
+        process.exitCode = r.ok ? EXIT_CODES.SUCCESS : EXIT_CODES.GENERIC_ERROR;
+      });
+  }
 
   // ── Built-in: explore / synthesize / generate / cascade ───────────────────
 
-  program
-    .command('explore')
-    .alias('probe')
-    .description('Explore a website: discover APIs, stores, and recommend strategies')
-    .argument('<url>')
-    .option('--site <name>')
-    .option('--goal <text>')
-    .option('--wait <s>', '', '3')
-    .option('--auto', 'Enable interactive fuzzing')
-    .option('--click <labels>', 'Comma-separated labels to click before fuzzing')
-    .action(async (url, opts) => {
-      const { exploreUrl, renderExploreSummary } = await import('./explore.js');
-      const clickLabels = opts.click
-        ? opts.click.split(',').map((s: string) => s.trim())
-        : undefined;
-      const workspace = `explore:${inferHost(url, opts.site)}`;
-      const result = await exploreUrl(url, {
-        BrowserFactory: getBrowserFactory(),
-        site: opts.site,
-        goal: opts.goal,
-        waitSeconds: parseFloat(opts.wait),
-        auto: opts.auto,
-        clickLabels,
-        workspace,
+  if (!ENABLE_RECRUITING_ONLY_MODE) {
+    program
+      .command('explore')
+      .alias('probe')
+      .description('Explore a website: discover APIs, stores, and recommend strategies')
+      .argument('<url>')
+      .option('--site <name>')
+      .option('--goal <text>')
+      .option('--wait <s>', '', '3')
+      .option('--auto', 'Enable interactive fuzzing')
+      .option('--click <labels>', 'Comma-separated labels to click before fuzzing')
+      .action(async (url, opts) => {
+        const { exploreUrl, renderExploreSummary } = await import('./explore.js');
+        const clickLabels = opts.click
+          ? opts.click.split(',').map((s: string) => s.trim())
+          : undefined;
+        const workspace = `explore:${inferHost(url, opts.site)}`;
+        const result = await exploreUrl(url, {
+          BrowserFactory: getBrowserFactory(),
+          site: opts.site,
+          goal: opts.goal,
+          waitSeconds: parseFloat(opts.wait),
+          auto: opts.auto,
+          clickLabels,
+          workspace,
+        });
+        console.log(renderExploreSummary(result));
       });
-      console.log(renderExploreSummary(result));
-    });
 
-  program
-    .command('synthesize')
-    .description('Synthesize CLIs from explore')
-    .argument('<target>')
-    .option('--top <n>', '', '3')
-    .action(async (target, opts) => {
-      const { synthesizeFromExplore, renderSynthesizeSummary } = await import('./synthesize.js');
-      console.log(renderSynthesizeSummary(synthesizeFromExplore(target, { top: parseInt(opts.top) })));
-    });
-
-  program
-    .command('generate')
-    .description('One-shot: explore → synthesize → register')
-    .argument('<url>')
-    .option('--goal <text>')
-    .option('--site <name>')
-    .action(async (url, opts) => {
-      const { generateCliFromUrl, renderGenerateSummary } = await import('./generate.js');
-      const workspace = `generate:${inferHost(url, opts.site)}`;
-      const r = await generateCliFromUrl({
-        url,
-        BrowserFactory: getBrowserFactory(),
-        goal: opts.goal,
-        site: opts.site,
-        workspace,
+    program
+      .command('synthesize')
+      .description('Synthesize CLIs from explore')
+      .argument('<target>')
+      .option('--top <n>', '', '3')
+      .action(async (target, opts) => {
+        const { synthesizeFromExplore, renderSynthesizeSummary } = await import('./synthesize.js');
+        console.log(renderSynthesizeSummary(synthesizeFromExplore(target, { top: parseInt(opts.top) })));
       });
-      console.log(renderGenerateSummary(r));
-      process.exitCode = r.ok ? EXIT_CODES.SUCCESS : EXIT_CODES.GENERIC_ERROR;
-    });
+
+    program
+      .command('generate')
+      .description('One-shot: explore → synthesize → register')
+      .argument('<url>')
+      .option('--goal <text>')
+      .option('--site <name>')
+      .action(async (url, opts) => {
+        const { generateCliFromUrl, renderGenerateSummary } = await import('./generate.js');
+        const workspace = `generate:${inferHost(url, opts.site)}`;
+        const r = await generateCliFromUrl({
+          url,
+          BrowserFactory: getBrowserFactory(),
+          goal: opts.goal,
+          site: opts.site,
+          workspace,
+        });
+        console.log(renderGenerateSummary(r));
+        process.exitCode = r.ok ? EXIT_CODES.SUCCESS : EXIT_CODES.GENERIC_ERROR;
+      });
 
   // ── Built-in: record ─────────────────────────────────────────────────────
 
-  program
-    .command('record')
-    .description('Record API calls from a live browser session → generate YAML candidates')
-    .argument('<url>', 'URL to open and record')
-    .option('--site <name>', 'Site name (inferred from URL if omitted)')
-    .option('--out <dir>', 'Output directory for candidates')
-    .option('--poll <ms>', 'Poll interval in milliseconds', '2000')
-    .option('--timeout <ms>', 'Auto-stop after N milliseconds (default: 60000)', '60000')
-    .action(async (url, opts) => {
-      const { recordSession, renderRecordSummary } = await import('./record.js');
-      const result = await recordSession({
-        BrowserFactory: getBrowserFactory(),
-        url,
-        site: opts.site,
-        outDir: opts.out,
-        pollMs: parseInt(opts.poll, 10),
-        timeoutMs: parseInt(opts.timeout, 10),
+    program
+      .command('record')
+      .description('Record API calls from a live browser session → generate YAML candidates')
+      .argument('<url>', 'URL to open and record')
+      .option('--site <name>', 'Site name (inferred from URL if omitted)')
+      .option('--out <dir>', 'Output directory for candidates')
+      .option('--poll <ms>', 'Poll interval in milliseconds', '2000')
+      .option('--timeout <ms>', 'Auto-stop after N milliseconds (default: 60000)', '60000')
+      .action(async (url, opts) => {
+        const { recordSession, renderRecordSummary } = await import('./record.js');
+        const result = await recordSession({
+          BrowserFactory: getBrowserFactory(),
+          url,
+          site: opts.site,
+          outDir: opts.out,
+          pollMs: parseInt(opts.poll, 10),
+          timeoutMs: parseInt(opts.timeout, 10),
+        });
+        console.log(renderRecordSummary(result));
+        process.exitCode = result.candidateCount > 0 ? EXIT_CODES.SUCCESS : EXIT_CODES.EMPTY_RESULT;
       });
-      console.log(renderRecordSummary(result));
-      process.exitCode = result.candidateCount > 0 ? EXIT_CODES.SUCCESS : EXIT_CODES.EMPTY_RESULT;
-    });
 
-  program
-    .command('cascade')
-    .description('Strategy cascade: find simplest working strategy')
-    .argument('<url>')
-    .option('--site <name>')
-    .action(async (url, opts) => {
-      const { cascadeProbe, renderCascadeResult } = await import('./cascade.js');
-      const workspace = `cascade:${inferHost(url, opts.site)}`;
-      const result = await browserSession(getBrowserFactory(), async (page) => {
-        try {
-          const siteUrl = new URL(url);
-          await page.goto(`${siteUrl.protocol}//${siteUrl.host}`);
-          await page.wait(2);
-        } catch {}
-        return cascadeProbe(page, url);
-      }, { workspace });
-      console.log(renderCascadeResult(result));
-    });
+    program
+      .command('cascade')
+      .description('Strategy cascade: find simplest working strategy')
+      .argument('<url>')
+      .option('--site <name>')
+      .action(async (url, opts) => {
+        const { cascadeProbe, renderCascadeResult } = await import('./cascade.js');
+        const workspace = `cascade:${inferHost(url, opts.site)}`;
+        const result = await browserSession(getBrowserFactory(), async (page) => {
+          try {
+            const siteUrl = new URL(url);
+            await page.goto(`${siteUrl.protocol}//${siteUrl.host}`);
+            await page.wait(2);
+          } catch {}
+          return cascadeProbe(page, url);
+        }, { workspace });
+        console.log(renderCascadeResult(result));
+      });
+  }
 
   // ── Built-in: operate (browser control for Claude Code skill) ───────────────
   //
@@ -254,7 +261,7 @@ export function runCli(BUILTIN_CLIS: string, USER_CLIS: string): void {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (msg.includes('Extension not connected') || msg.includes('Daemon')) {
-          console.error(`Browser not connected. Run 'opencli doctor' to diagnose.`);
+          console.error(`Browser not connected. Run '${formatCompatCommandHint('doctor')}' to diagnose.`);
         } else if (msg.includes('attach failed') || msg.includes('chrome-extension://')) {
           console.error(`Browser attach failed — another extension may be interfering. Try disabling 1Password.`);
         } else {
@@ -489,9 +496,10 @@ export function runCli(BUILTIN_CLIS: string, USER_CLIS: string): void {
 
   // ── Init (adapter scaffolding) ──
 
-  operate.command('init')
+  if (!ENABLE_RECRUITING_ONLY_MODE) {
+    operate.command('init')
     .argument('<name>', 'Adapter name in site/command format (e.g. hn/top)')
-    .description('Generate adapter scaffold in ~/.opencli/clis/')
+    .description('Generate adapter scaffold in ~/.huntertools/clis/ (legacy ~/.opencli also works)')
     .action(async (name: string) => {
       try {
         const parts = name.split('/');
@@ -510,7 +518,7 @@ export function runCli(BUILTIN_CLIS: string, USER_CLIS: string): void {
         const os = await import('node:os');
         const fs = await import('node:fs');
         const path = await import('node:path');
-        const dir = path.join(os.homedir(), '.opencli', 'clis', site);
+        const dir = path.join(os.homedir(), '.huntertools', 'clis', site);
         const filePath = path.join(dir, `${command}.ts`);
 
         if (fs.existsSync(filePath)) {
@@ -550,7 +558,7 @@ cli({
         fs.mkdirSync(dir, { recursive: true });
         fs.writeFileSync(filePath, template, 'utf-8');
         console.log(`Created: ${filePath}`);
-        console.log(`Edit the file to implement your adapter, then run: opencli operate verify ${name}`);
+        console.log(`Edit the file to implement your adapter, then run: huntertools operate verify ${name}`);
       } catch (err) {
         console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
         process.exitCode = EXIT_CODES.GENERIC_ERROR;
@@ -576,12 +584,13 @@ cli({
         const { execSync } = await import('node:child_process');
         const os = await import('node:os');
         const path = await import('node:path');
-        const filePath = path.join(os.homedir(), '.opencli', 'clis', site, `${command}.ts`);
-
         const fs = await import('node:fs');
+        const primaryFilePath = path.join(os.homedir(), '.huntertools', 'clis', site, `${command}.ts`);
+        const legacyFilePath = path.join(os.homedir(), '.opencli', 'clis', site, `${command}.ts`);
+        const filePath = fs.existsSync(primaryFilePath) ? primaryFilePath : legacyFilePath;
         if (!fs.existsSync(filePath)) {
           console.error(`Adapter not found: ${filePath}`);
-          console.error(`Run "opencli operate init ${name}" to create it.`);
+          console.error(`Run "huntertools operate init ${name}" to create it.`);
           process.exitCode = EXIT_CODES.GENERIC_ERROR;
           return;
         }
@@ -597,11 +606,11 @@ cli({
             env: process.env,
             stdio: ['pipe', 'pipe', 'pipe'],
           });
-          console.log(`  Executing: opencli ${site} ${command} --limit 3\n`);
+          console.log(`  Executing: huntertools ${site} ${command} --limit 3\n`);
           console.log(output);
           console.log(`\n  ✓ Adapter works!`);
         } catch (err: any) {
-          console.log(`  Executing: opencli ${site} ${command} --limit 3\n`);
+          console.log(`  Executing: huntertools ${site} ${command} --limit 3\n`);
           if (err.stdout) console.log(err.stdout);
           if (err.stderr) console.error(err.stderr.slice(0, 500));
           console.log(`\n  ✗ Adapter failed. Fix the code and try again.`);
@@ -615,6 +624,8 @@ cli({
 
   // ── Session ──
 
+  }
+
   operate.command('close').description('Close the automation window')
     .action(operateAction(async (page) => {
       await page.closeWindow?.();
@@ -625,7 +636,7 @@ cli({
 
   program
     .command('doctor')
-    .description('Diagnose opencli browser bridge connectivity')
+    .description(`Diagnose ${PRIMARY_CLI_NAME} browser bridge connectivity`)
     .option('--no-live', 'Skip live browser connectivity test')
     .option('--sessions', 'Show active automation sessions', false)
     .action(async (opts) => {
@@ -644,9 +655,10 @@ cli({
 
   // ── Plugin management ──────────────────────────────────────────────────────
 
-  const pluginCmd = program.command('plugin').description('Manage opencli plugins');
+  if (!ENABLE_RECRUITING_ONLY_MODE) {
+    const pluginCmd = program.command('plugin').description('Manage opencli plugins');
 
-  pluginCmd
+    pluginCmd
     .command('install')
     .description('Install a plugin from a git repository')
     .argument('<source>', 'Plugin source (e.g. github:user/repo)')
@@ -671,7 +683,7 @@ cli({
       }
     });
 
-  pluginCmd
+    pluginCmd
     .command('uninstall')
     .description('Uninstall a plugin')
     .argument('<name>', 'Plugin name')
@@ -686,7 +698,7 @@ cli({
       }
     });
 
-  pluginCmd
+    pluginCmd
     .command('update')
     .description('Update a plugin (or all plugins) to the latest version')
     .argument('[name]', 'Plugin name (required unless --all is passed)')
@@ -748,7 +760,7 @@ cli({
     });
 
 
-  pluginCmd
+    pluginCmd
     .command('list')
     .description('List installed plugins')
     .option('-f, --format <fmt>', 'Output format: table, json', 'table')
@@ -838,7 +850,9 @@ cli({
     });
 
   // ── Built-in: daemon ──────────────────────────────────────────────────────
-  const daemonCmd = program.command('daemon').description('Manage the opencli daemon');
+  }
+
+  const daemonCmd = program.command('daemon').description(`Manage the ${PRIMARY_CLI_NAME} daemon`);
   daemonCmd
     .command('status')
     .description('Show daemon status')
@@ -854,32 +868,33 @@ cli({
 
   // ── External CLIs ─────────────────────────────────────────────────────────
 
-  const externalClis = loadExternalClis();
+  const externalClis = ENABLE_RECRUITING_ONLY_MODE ? [] : loadExternalClis();
 
-  program
-    .command('install')
-    .description('Install an external CLI')
-    .argument('<name>', 'Name of the external CLI')
-    .action((name: string) => {
-      const ext = externalClis.find(e => e.name === name);
-      if (!ext) {
-        console.error(chalk.red(`External CLI '${name}' not found in registry.`));
-        process.exitCode = EXIT_CODES.USAGE_ERROR;
-        return;
-      }
-      installExternalCli(ext);
-    });
+  if (!ENABLE_RECRUITING_ONLY_MODE) {
+    program
+      .command('install')
+      .description('Install an external CLI')
+      .argument('<name>', 'Name of the external CLI')
+      .action((name: string) => {
+        const ext = externalClis.find(e => e.name === name);
+        if (!ext) {
+          console.error(chalk.red(`External CLI '${name}' not found in registry.`));
+          process.exitCode = EXIT_CODES.USAGE_ERROR;
+          return;
+        }
+        installExternalCli(ext);
+      });
 
-  program
-    .command('register')
-    .description('Register an external CLI')
-    .argument('<name>', 'Name of the CLI')
-    .option('--binary <bin>', 'Binary name if different from name')
-    .option('--install <cmd>', 'Auto-install command')
-    .option('--desc <text>', 'Description')
-    .action((name, opts) => {
-      registerExternalCli(name, { binary: opts.binary, install: opts.install, description: opts.desc });
-    });
+    program
+      .command('register')
+      .description('Register an external CLI')
+      .argument('<name>', 'Name of the CLI')
+      .option('--binary <bin>', 'Binary name if different from name')
+      .option('--install <cmd>', 'Auto-install command')
+      .option('--desc <text>', 'Description')
+      .action((name, opts) => {
+        registerExternalCli(name, { binary: opts.binary, install: opts.install, description: opts.desc });
+      });
 
   function passthroughExternal(name: string, parsedArgs?: string[]) {
     const args = parsedArgs ?? (() => {
@@ -894,34 +909,24 @@ cli({
     }
   }
 
-  for (const ext of externalClis) {
-    if (program.commands.some(c => c.name() === ext.name)) continue;
-    program
-      .command(ext.name)
-      .description(`(External) ${ext.description || ext.name}`)
-      .argument('[args...]')
-      .allowUnknownOption()
-      .passThroughOptions()
-      .helpOption(false)
-      .action((args: string[]) => passthroughExternal(ext.name, args));
+    for (const ext of externalClis) {
+      if (program.commands.some(c => c.name() === ext.name)) continue;
+      program
+        .command(ext.name)
+        .description(`(External) ${ext.description || ext.name}`)
+        .argument('[args...]')
+        .allowUnknownOption()
+        .passThroughOptions()
+        .helpOption(false)
+        .action((args: string[]) => passthroughExternal(ext.name, args));
+    }
   }
 
   // ── Antigravity serve (long-running, special case) ────────────────────────
 
-  const antigravityCmd = program.command('antigravity').description('antigravity commands');
-  antigravityCmd
-    .command('serve')
-    .description('Start Anthropic-compatible API proxy for Antigravity')
-    .option('--port <port>', 'Server port (default: 8082)', '8082')
-    .action(async (opts) => {
-      const { startServe } = await import('./clis/antigravity/serve.js');
-      await startServe({ port: parseInt(opts.port) });
-    });
-
   // ── Dynamic adapter commands ──────────────────────────────────────────────
 
   const siteGroups = new Map<string, Command>();
-  siteGroups.set('antigravity', antigravityCmd);
   registerAllCommands(program, siteGroups);
 
   // ── Unknown command fallback ──────────────────────────────────────────────
@@ -931,7 +936,7 @@ cli({
   program.on('command:*', (operands: string[]) => {
     const binary = operands[0];
     console.error(chalk.red(`error: unknown command '${binary}'`));
-    if (isBinaryInstalled(binary)) {
+    if (!ENABLE_RECRUITING_ONLY_MODE && isBinaryInstalled(binary)) {
       console.error(chalk.dim(`  Tip: '${binary}' exists on your PATH. Use 'opencli register ${binary}' to add it as an external CLI.`));
     }
     program.outputHelp();

@@ -1,8 +1,8 @@
 /**
  * CLI commands for daemon lifecycle management:
- *   opencli daemon status  — show daemon state
- *   opencli daemon stop    — graceful shutdown
- *   opencli daemon restart — stop + respawn
+ *   huntertools daemon status  — show daemon state
+ *   huntertools daemon stop    — graceful shutdown
+ *   huntertools daemon restart — stop + respawn
  */
 
 import chalk from 'chalk';

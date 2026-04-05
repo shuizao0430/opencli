@@ -7,6 +7,7 @@ import yaml from 'js-yaml';
 import chalk from 'chalk';
 import { log } from './logger.js';
 import { EXIT_CODES, getErrorMessage } from './errors.js';
+import { LEGACY_RUNTIME_DIRNAME, PRIMARY_RUNTIME_DIRNAME } from './branding.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -28,7 +29,12 @@ export interface ExternalCliConfig {
 
 function getUserRegistryPath(): string {
   const home = os.homedir();
-  return path.join(home, '.opencli', 'external-clis.yaml');
+  return path.join(home, PRIMARY_RUNTIME_DIRNAME, 'external-clis.yaml');
+}
+
+function getLegacyUserRegistryPath(): string {
+  const home = os.homedir();
+  return path.join(home, LEGACY_RUNTIME_DIRNAME, 'external-clis.yaml');
 }
 
 let _cachedExternalClis: ExternalCliConfig[] | null = null;
@@ -50,17 +56,17 @@ export function loadExternalClis(): ExternalCliConfig[] {
   }
 
   // 2. Load user custom
-  const userPath = getUserRegistryPath();
-  try {
-    if (fs.existsSync(userPath)) {
+  for (const userPath of [getLegacyUserRegistryPath(), getUserRegistryPath()]) {
+    try {
+      if (!fs.existsSync(userPath)) continue;
       const raw = fs.readFileSync(userPath, 'utf8');
       const parsed = (yaml.load(raw) || []) as ExternalCliConfig[];
       for (const item of parsed) {
         configs.set(item.name, item); // Overwrite built-in if duplicated
       }
+    } catch (err) {
+      log.warn(`Failed to parse user external-clis.yaml: ${getErrorMessage(err)}`);
     }
-  } catch (err) {
-    log.warn(`Failed to parse user external-clis.yaml: ${getErrorMessage(err)}`);
   }
 
   _cachedExternalClis = Array.from(configs.values()).sort((a, b) => a.name.localeCompare(b.name));

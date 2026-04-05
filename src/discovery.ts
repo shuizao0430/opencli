@@ -17,13 +17,18 @@ import { type CliCommand, type InternalCliCommand, type Arg, Strategy, registerC
 import { getErrorMessage } from './errors.js';
 import { log } from './logger.js';
 import type { ManifestEntry } from './build-manifest.js';
+import { isActiveSite } from './product-profile.js';
+import { LEGACY_RUNTIME_DIRNAME, PRIMARY_RUNTIME_DIRNAME } from './branding.js';
 
-/** User runtime directory: ~/.opencli */
-export const USER_OPENCLI_DIR = path.join(os.homedir(), '.opencli');
-/** User CLIs directory: ~/.opencli/clis */
-export const USER_CLIS_DIR = path.join(USER_OPENCLI_DIR, 'clis');
-/** Plugins directory: ~/.opencli/plugins/ */
-export const PLUGINS_DIR = path.join(USER_OPENCLI_DIR, 'plugins');
+/** User runtime directories: primary ~/.huntertools, legacy ~/.opencli */
+export const USER_RUNTIME_DIR = path.join(os.homedir(), PRIMARY_RUNTIME_DIRNAME);
+export const LEGACY_USER_RUNTIME_DIR = path.join(os.homedir(), LEGACY_RUNTIME_DIRNAME);
+/** User CLIs directory */
+export const USER_CLIS_DIR = path.join(USER_RUNTIME_DIR, 'clis');
+export const LEGACY_USER_CLIS_DIR = path.join(LEGACY_USER_RUNTIME_DIR, 'clis');
+/** Plugins directory */
+export const PLUGINS_DIR = path.join(USER_RUNTIME_DIR, 'plugins');
+export const LEGACY_PLUGINS_DIR = path.join(LEGACY_USER_RUNTIME_DIR, 'plugins');
 /** Matches files that register commands via cli() or lifecycle hooks */
 const PLUGIN_MODULE_PATTERN = /\b(?:cli|onStartup|onBeforeExecute|onAfterExecute)\s*\(/;
 
@@ -57,10 +62,10 @@ async function writeCompatShimIfNeeded(filePath: string, content: string): Promi
 }
 
 /**
- * Create runtime shim files under ~/.opencli so legacy user TS CLIs can keep
+ * Create runtime shim files under the selected runtime directory so user TS CLIs can keep
  * importing ../../registry(.js) and ../../errors(.js).
  */
-export async function ensureUserCliCompatShims(baseDir: string = USER_OPENCLI_DIR): Promise<void> {
+async function ensureCompatShimsInDir(baseDir: string): Promise<void> {
   await fs.promises.mkdir(baseDir, { recursive: true });
 
   const registryUrl = pathToFileURL(resolveHostRuntimeModulePath('registry-api')).href;
@@ -73,14 +78,14 @@ export async function ensureUserCliCompatShims(baseDir: string = USER_OPENCLI_DI
     writeCompatShimIfNeeded(path.join(baseDir, 'errors.js'), `export * from '${errorsUrl}';\n`),
     writeCompatShimIfNeeded(
       path.join(baseDir, 'package.json'),
-      `${JSON.stringify({ name: 'opencli-user-runtime', private: true, type: 'module' }, null, 2)}\n`,
+      `${JSON.stringify({ name: 'huntertools-user-runtime', private: true, type: 'module' }, null, 2)}\n`,
     ),
   ]);
 
   // Create node_modules/@jackwener/opencli symlink so user TS CLIs can import
   // from '@jackwener/opencli/registry' (the package export).
-  // This is needed because ~/.opencli/clis/ is outside opencli's node_modules tree.
-  const opencliRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  // This is needed because the user runtime lives outside the host node_modules tree.
+  const hostRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const symlinkDir = path.join(baseDir, 'node_modules', '@jackwener');
   const symlinkPath = path.join(symlinkDir, 'opencli');
   try {
@@ -88,15 +93,29 @@ export async function ensureUserCliCompatShims(baseDir: string = USER_OPENCLI_DI
     let needsUpdate = true;
     try {
       const existing = await fs.promises.readlink(symlinkPath);
-      if (existing === opencliRoot) needsUpdate = false;
+      if (existing === hostRoot) needsUpdate = false;
     } catch { /* doesn't exist */ }
     if (needsUpdate) {
       await fs.promises.mkdir(symlinkDir, { recursive: true });
       try { await fs.promises.unlink(symlinkPath); } catch { /* doesn't exist */ }
-      await fs.promises.symlink(opencliRoot, symlinkPath, 'dir');
+      await fs.promises.symlink(hostRoot, symlinkPath, 'dir');
     }
   } catch {
     // Non-fatal: npm-linked installs or permission issues may prevent this
+  }
+}
+
+export async function ensureUserCliCompatShims(baseDir?: string): Promise<void> {
+  if (baseDir) {
+    await ensureCompatShimsInDir(baseDir);
+    return;
+  }
+  await ensureCompatShimsInDir(USER_RUNTIME_DIR);
+  try {
+    await fs.promises.access(LEGACY_USER_RUNTIME_DIR);
+    await ensureCompatShimsInDir(LEGACY_USER_RUNTIME_DIR);
+  } catch {
+    // No legacy runtime directory yet.
   }
 }
 
@@ -129,6 +148,7 @@ async function loadFromManifest(manifestPath: string, clisDir: string): Promise<
     const raw = await fs.promises.readFile(manifestPath, 'utf-8');
     const manifest = JSON.parse(raw) as ManifestEntry[];
     for (const entry of manifest) {
+      if (!isActiveSite(entry.site)) continue;
       if (entry.type === 'yaml') {
         // YAML pipelines fully inlined in manifest — register directly
         const strategy = parseStrategy(entry.strategy);
@@ -194,6 +214,7 @@ async function discoverClisFromFs(dir: string): Promise<void> {
     .filter(entry => entry.isDirectory())
     .map(async (entry) => {
       const site = entry.name;
+      if (!isActiveSite(site)) return;
       const siteDir = path.join(dir, site);
       const files = await fs.promises.readdir(siteDir);
       await Promise.all(files.map(async (file) => {
@@ -256,18 +277,23 @@ async function registerYamlCli(filePath: string, defaultSite: string): Promise<v
 }
 
 /**
- * Discover and register plugins from ~/.opencli/plugins/.
+ * Discover and register plugins from the primary or legacy runtime directory.
  * Each subdirectory is treated as a plugin (site = directory name).
  * Files inside are scanned flat (no nested site subdirs).
  */
 export async function discoverPlugins(): Promise<void> {
-  try { await fs.promises.access(PLUGINS_DIR); } catch { return; }
-  const entries = await fs.promises.readdir(PLUGINS_DIR, { withFileTypes: true });
-  await Promise.all(entries.map(async (entry) => {
-    const pluginDir = path.join(PLUGINS_DIR, entry.name);
-    if (!(await isDiscoverablePluginDir(entry, pluginDir))) return;
-    await discoverPluginDir(pluginDir, entry.name);
-  }));
+  const seen = new Set<string>();
+  for (const root of [PLUGINS_DIR, LEGACY_PLUGINS_DIR]) {
+    try { await fs.promises.access(root); } catch { continue; }
+    const entries = await fs.promises.readdir(root, { withFileTypes: true });
+    await Promise.all(entries.map(async (entry) => {
+      if (seen.has(entry.name)) return;
+      const pluginDir = path.join(root, entry.name);
+      if (!(await isDiscoverablePluginDir(entry, pluginDir))) return;
+      seen.add(entry.name);
+      await discoverPluginDir(pluginDir, entry.name);
+    }));
+  }
 }
 
 /**

@@ -1,37 +1,38 @@
 # 安装
 
-## 系统要求
+## 前置要求
 
-- **Node.js**: >= 20.0.0
-- **Chrome** 已运行并登录目标网站（浏览器命令需要）
+- Node.js >= 20.0.0
+- Chrome 正在运行，且已登录 LinkedIn
+- 使用 Recruiter 命令时，需要可用的 LinkedIn Recruiter 权限
 
-## 通过 npm 安装（推荐）
+## 通过 npm 安装
 
 ```bash
-npm install -g @jackwener/opencli
+npm install -g huntertoolscli
 ```
 
 ## 从源码安装
 
 ```bash
-git clone git@github.com:jackwener/opencli.git
-cd opencli
+git clone git@github.com:shuizao0430/opencli.git HunterToolsCLI
+cd HunterToolsCLI
 npm install
 npm run build
 npm link
-opencli list
+huntertools list
 ```
 
 ## 更新
 
 ```bash
-npm install -g @jackwener/opencli@latest
+npm install -g huntertoolscli@latest
 ```
 
 ## 验证安装
 
 ```bash
-opencli --version
-opencli list
-opencli doctor
+huntertools --version
+huntertools list
+huntertools doctor
 ```

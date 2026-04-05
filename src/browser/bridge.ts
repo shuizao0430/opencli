@@ -11,6 +11,8 @@ import type { IBrowserFactory } from '../runtime.js';
 import { Page } from './page.js';
 import { isDaemonRunning, isExtensionConnected } from './daemon-client.js';
 import { DEFAULT_DAEMON_PORT } from '../constants.js';
+import { EXTENSION_NAME, PRODUCT_NAME } from '../branding.js';
+import { getCompatEnv } from '../env.js';
 
 const DAEMON_SPAWN_TIMEOUT = 10000; // 10s to wait for daemon + extension
 
@@ -65,9 +67,9 @@ export class BrowserBridge implements IBrowserFactory {
 
     // Daemon running but no extension — wait for extension with progress
     if (await isDaemonRunning()) {
-      if (process.env.OPENCLI_VERBOSE || process.stderr.isTTY) {
+      if (getCompatEnv('OPENCLI_VERBOSE') || process.stderr.isTTY) {
         process.stderr.write('⏳ Waiting for Chrome extension to connect...\n');
-        process.stderr.write('   Make sure Chrome is open and the OpenCLI extension is enabled.\n');
+        process.stderr.write(`   Make sure Chrome is open and the ${EXTENSION_NAME} extension is enabled.\n`);
       }
       const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {
@@ -76,7 +78,7 @@ export class BrowserBridge implements IBrowserFactory {
       }
       throw new Error(
         'Daemon is running but the Browser Extension is not connected.\n' +
-        'Please install and enable the opencli Browser Bridge extension in Chrome.',
+        `Please install and enable the ${EXTENSION_NAME} extension in Chrome.`,
       );
     }
 
@@ -88,7 +90,7 @@ export class BrowserBridge implements IBrowserFactory {
     const isTs = fs.existsSync(daemonTs);
     const daemonPath = isTs ? daemonTs : daemonJs;
 
-    if (process.env.OPENCLI_VERBOSE || process.stderr.isTTY) {
+    if (getCompatEnv('OPENCLI_VERBOSE') || process.stderr.isTTY) {
       process.stderr.write('⏳ Starting daemon...\n');
     }
 
@@ -113,12 +115,12 @@ export class BrowserBridge implements IBrowserFactory {
     if (await isDaemonRunning()) {
       throw new Error(
         'Daemon is running but the Browser Extension is not connected.\n' +
-        'Please install and enable the opencli Browser Bridge extension in Chrome.',
+        `Please install and enable the ${EXTENSION_NAME} extension in Chrome.`,
       );
     }
 
     throw new Error(
-      'Failed to start opencli daemon. Try running manually:\n' +
+      `Failed to start ${PRODUCT_NAME} daemon. Try running manually:\n` +
       `  node ${daemonPath}\n` +
       `Make sure port ${DEFAULT_DAEMON_PORT} is available.`,
     );
